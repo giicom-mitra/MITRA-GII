@@ -396,6 +396,11 @@ footer{margin-top:24px;font-size:11.5px;color:var(--ink-soft);text-align:center;
       <div id="gateNewAccountFields" style="display:none;">
         <label class="gate-label">Ulangi Sandi</label>
         <input type="password" id="gateConfirmPassword" placeholder="Ulangi sandi" class="gate-input">
+        <label class="gate-label">Mitra</label>
+        <select id="gateMitra" class="gate-input">
+          <option value="Mix-mix">Mix-mix</option>
+          <option value="Thunder">Thunder</option>
+        </select>
         <label class="gate-label">Buat Pertanyaan Keamanan <span style="font-weight:400;color:var(--ink-soft);">(buat jaga-jaga kalau lupa sandi)</span></label>
         <input type="text" id="gateSecQ" placeholder="mis. Nama hewan peliharaan pertama?" class="gate-input">
         <label class="gate-label">Jawabannya</label>
@@ -481,6 +486,7 @@ footer{margin-top:24px;font-size:11.5px;color:var(--ink-soft);text-align:center;
         </div>
       </div>
       <span id="cloudSyncBadge" style="display:none;align-items:center;gap:5px;padding:5px 10px;border-radius:6px;font-size:11px;font-weight:600;cursor:default;"></span>
+      <span id="mitraLabel" style="display:none;align-items:center;padding:5px 10px;border-radius:6px;font-size:11px;font-weight:700;background:#eef1ff;color:#3d3fa3;border:1px solid #d3d6f7;"></span>
     </div>
   </div>
 </div>
@@ -1178,6 +1184,12 @@ function setSyncBadge(state){
   }
 }
 
+function currentRawSheetName(){
+  const mitra = (currentUser && currentUser.mitra) ? currentUser.mitra : 'Mix-mix';
+  const slug = mitra.replace(/[^a-zA-Z0-9]+/g,'') || 'Default';
+  return 'RawData_' + slug;
+}
+
 async function pushRawRowsToCloud(headers, rows){
   if(typeof GAS_URL === 'undefined' || !GAS_URL) return;
   try{
@@ -1189,7 +1201,7 @@ async function pushRawRowsToCloud(headers, rows){
       method: 'POST',
       mode: 'no-cors',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify({ action: 'appendRows', sheet: 'RawData', rows: orderedRows })
+      body: JSON.stringify({ action: 'appendRows', sheet: currentRawSheetName(), rows: orderedRows })
     });
     lastFailedPush = null;
     setSyncBadge('synced');
@@ -1203,13 +1215,15 @@ async function pushRawRowsToCloud(headers, rows){
 async function loadRawDataFromCloud(){
   if(typeof GAS_URL === 'undefined' || !GAS_URL) return;
   try{
-    const res = await fetch(GAS_URL + '?action=get&sheet=RawData');
+    setSyncBadge('syncing');
+    const sheetName = currentRawSheetName();
+    const res = await fetch(GAS_URL + '?action=get&sheet=' + encodeURIComponent(sheetName));
     const data = await res.json();
-    if(!data || !data.rows || !data.rows.length) return;
+    if(!data || !data.rows || !data.rows.length){ setSyncBadge('synced'); return; }
     RAW_BATCHES = [{
       headers: CANONICAL_COL_ORDER, rows: data.rows,
       importedAt: new Date().toISOString().slice(0,10),
-      sourceFile: 'Google Sheets (Cloud)'
+      sourceFile: 'Google Sheets (Cloud - ' + sheetName + ')'
     }];
     importRawGrosirRows(CANONICAL_COL_ORDER, data.rows);
     finishImportRefresh();
@@ -1218,6 +1232,7 @@ async function loadRawDataFromCloud(){
     setSyncBadge('synced');
   } catch(e){
     console.error('loadRawDataFromCloud error', e);
+    setSyncBadge('error');
   }
 }
 const DATA = JSON.parse(document.getElementById('dashdata').textContent);
@@ -3581,7 +3596,7 @@ async function rememberAccount(nama, identifier, method){
   await saveSavedAccounts(list);
 }
 
-async function finalizeLogin(nama, identifier, method){
+async function finalizeLogin(nama, identifier, method, mitra){
   await loadAdminEmails();
   let role;
   if(ADMIN_EMAILS.length === 0){
@@ -3593,7 +3608,7 @@ async function finalizeLogin(nama, identifier, method){
   } else {
     role = 'Leader';
   }
-  currentUser = {name: nama, email: identifier, role};
+  currentUser = {name: nama, email: identifier, role, mitra: mitra || 'Mix-mix'};
   if(hasStorage){
     try{ await window.storage.set('access:last-login', JSON.stringify({name:nama, identifier, method}), false); }catch(e){}
   }
@@ -3601,7 +3616,26 @@ async function finalizeLogin(nama, identifier, method){
   applyRoleUI();
   document.getElementById('loginGate').style.display = 'none';
   document.getElementById('mainApp').style.display = '';
-  showToast(`Selamat datang, ${nama}! Masuk sebagai ${role}.`);
+  const mitraLabelEl = document.getElementById('mitraLabel');
+  if(mitraLabelEl){ mitraLabelEl.style.display = 'inline-flex'; mitraLabelEl.textContent = '🏬 Mitra: ' + currentUser.mitra; }
+  showToast(`Selamat datang, ${nama}! Masuk sebagai ${role} — Mitra ${currentUser.mitra}.`);
+  // Kosongkan dulu data dashboard sebelumnya (kalau ada, misal ganti akun),
+  // lalu muat data mentah khusus mitra ini dari Spreadsheet.
+  resetRawDashboardState();
+  loadRawDataFromCloud();
+}
+
+function resetRawDashboardState(){
+  MONTHS = [];
+  CUSTS = [];
+  RAW_BATCHES = [];
+  PRODUCTS = [];
+  CUST_SKU_MAP = {};
+  PRODUCT_CUST_REVENUE = {};
+  PRODUCT_INVOICES = {};
+  if(typeof recomputeCrossSell === 'function') recomputeCrossSell();
+  if(typeof finishImportRefresh === 'function') finishImportRefresh();
+  if(typeof populateRawBatchFilter === 'function') populateRawBatchFilter();
 }
 
 function initialsOf(name){
@@ -3679,7 +3713,7 @@ document.getElementById('qpSubmit').addEventListener('click', async ()=>{
     msg.textContent = 'Sandi salah. Klik "Lupa sandi?" kalau perlu direset.';
     return;
   }
-  await finalizeLogin(quickLoginAccount.name, quickLoginAccount.identifier, quickLoginAccount.method);
+  await finalizeLogin(quickLoginAccount.name, quickLoginAccount.identifier, quickLoginAccount.method, acct.mitra || 'Mix-mix');
 });
 document.getElementById('qpPassword').addEventListener('keydown', e=>{ if(e.key==='Enter') document.getElementById('qpSubmit').click(); });
 document.getElementById('qpForgotLink').addEventListener('click', ()=>{
@@ -3703,17 +3737,20 @@ document.getElementById('gateSubmit').addEventListener('click', async ()=>{
   const btn = document.getElementById('gateSubmit');
   btn.disabled = true;
   const acct = await loadAccount(identifier);
+  let acctMitra;
 
   if(!acct){
     // register new account
     const confirmPass = document.getElementById('gateConfirmPassword').value;
     const secQ = document.getElementById('gateSecQ').value.trim();
     const secA = document.getElementById('gateSecA').value.trim();
+    const mitra = document.getElementById('gateMitra').value;
     if(password !== confirmPass){ msg.textContent = 'Ulangi sandi tidak cocok.'; btn.disabled=false; return; }
     if(!secQ || !secA){ msg.textContent = 'Isi pertanyaan & jawaban keamanan (buat jaga-jaga lupa sandi).'; btn.disabled=false; return; }
     const passwordHash = await hashText(password);
     const secAHash = await hashText(secA.toLowerCase());
-    await saveAccount(identifier, {name:nama, method:gateMethod, passwordHash, secQ, secAHash, createdAt:new Date().toISOString().slice(0,10)});
+    await saveAccount(identifier, {name:nama, method:gateMethod, passwordHash, secQ, secAHash, mitra, createdAt:new Date().toISOString().slice(0,10)});
+    acctMitra = mitra;
   } else {
     // login: verify password
     const passwordHash = await hashText(password);
@@ -3722,9 +3759,10 @@ document.getElementById('gateSubmit').addEventListener('click', async ()=>{
       btn.disabled = false;
       return;
     }
+    acctMitra = acct.mitra || 'Mix-mix'; // akun lama sebelum fitur Mitra ada, default Mix-mix
   }
 
-  await finalizeLogin(nama, identifier, gateMethod);
+  await finalizeLogin(nama, identifier, gateMethod, acctMitra);
   btn.disabled = false;
 });
 ['gateIdentifier','gateNama','gatePassword','gateConfirmPassword','gateSecA'].forEach(id=>{
@@ -3819,14 +3857,16 @@ document.getElementById('cpSubmit').addEventListener('click', async ()=>{
 });
 
 (async function initGate(){
-  // Halaman depan/login dihilangkan — langsung akses penuh tanpa perlu isi apapun.
-  currentUser = {name: 'Tim', email: 'tim@bisnis.local', role: 'Admin'};
-  await loadAdminEmails();
-  if(ADMIN_EMAILS.length === 0){
-    ADMIN_EMAILS.push(currentUser.email);
-    await saveAdminEmails();
+  document.getElementById('loginGate').style.display = 'flex';
+  document.getElementById('mainApp').style.display = 'none';
+  await loadLastLogin();
+  const saved = await loadSavedAccounts();
+  if(saved.length){
+    await renderSavedAccounts();
+    showQuickPassword(saved[saved.length-1]); // langsung tawarkan akun terakhir dipakai
+  } else {
+    showFullForm();
   }
-  applyRoleUI();
 })();
 
 document.getElementById('btnAboutSystem').addEventListener('click', ()=>{
@@ -4994,10 +5034,6 @@ document.querySelectorAll('#askExamples .chip').forEach(ch=>{
   ch.addEventListener('click', ()=> askQuestion(ch.dataset.q));
 });
 addAskMsg('bot', renderAskAnswer({text:'Halo! Tanya apa saja soal data customer — misalnya siapa yang paling tinggi omzetnya, siapa yang churned, atau ketik nama customer langsung. Klik salah satu contoh di atas untuk mulai.'}));
-
-// Muat data mentah dari Spreadsheet (kalau ada) begitu app dibuka,
-// supaya semua orang yang buka link lihat data yang sama.
-loadRawDataFromCloud();
 
 </script>
 </body>
