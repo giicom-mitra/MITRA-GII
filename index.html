@@ -480,6 +480,7 @@ footer{margin-top:24px;font-size:11.5px;color:var(--ink-soft);text-align:center;
           <div class="dropdown-item" id="exportMatrix">Export Tabel Bulanan (.csv)</div>
         </div>
       </div>
+      <span id="cloudSyncBadge" style="display:none;align-items:center;gap:5px;padding:5px 10px;border-radius:6px;font-size:11px;font-weight:600;cursor:default;"></span>
     </div>
   </div>
 </div>
@@ -1153,6 +1154,72 @@ if (typeof window !== 'undefined' && !window.storage && GAS_URL && !GAS_URL.incl
 }
 
 const hasStorage = (typeof window !== 'undefined') && !!window.storage;
+
+// ===== Sync status badge + push helper untuk data mentah (Robert) =====
+let lastFailedPush = null;
+function setSyncBadge(state){
+  const el = document.getElementById('cloudSyncBadge');
+  if(!el) return;
+  el.style.display = 'inline-flex';
+  el.onclick = null;
+  if(state === 'syncing'){
+    el.style.background = '#fff8e1'; el.style.color = '#8a6d00'; el.style.border = '1px solid #f0d778';
+    el.textContent = '☁ Menyimpan ke cloud...';
+  } else if(state === 'synced'){
+    el.style.background = '#e6f7ee'; el.style.color = '#0a7a3d'; el.style.border = '1px solid #a6e6c4';
+    el.textContent = '✓ Tersimpan ke Cloud';
+  } else if(state === 'error'){
+    el.style.background = '#fdeaea'; el.style.color = '#b3261e'; el.style.border = '1px solid #f3b8b4';
+    el.textContent = '✗ Gagal sync — klik untuk coba lagi';
+    el.style.cursor = 'pointer';
+    el.onclick = ()=>{ if(lastFailedPush) pushRawRowsToCloud(lastFailedPush.headers, lastFailedPush.rows); };
+  } else {
+    el.style.display = 'none';
+  }
+}
+
+async function pushRawRowsToCloud(headers, rows){
+  if(typeof GAS_URL === 'undefined' || !GAS_URL) return;
+  try{
+    setSyncBadge('syncing');
+    const hnorm = headers.map(h=>String(h).trim().toLowerCase());
+    const idx = CANONICAL_COL_ORDER.map(col => hnorm.indexOf(col.toLowerCase()));
+    const orderedRows = rows.map(r => idx.map(i => i>=0 ? (r[i]!==undefined ? r[i] : '') : ''));
+    await fetch(GAS_URL, {
+      method: 'POST',
+      mode: 'no-cors',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ action: 'appendRows', sheet: 'RawData', rows: orderedRows })
+    });
+    lastFailedPush = null;
+    setSyncBadge('synced');
+  } catch(e){
+    console.error('pushRawRowsToCloud error', e);
+    lastFailedPush = { headers, rows };
+    setSyncBadge('error');
+  }
+}
+
+async function loadRawDataFromCloud(){
+  if(typeof GAS_URL === 'undefined' || !GAS_URL) return;
+  try{
+    const res = await fetch(GAS_URL + '?action=get&sheet=RawData');
+    const data = await res.json();
+    if(!data || !data.rows || !data.rows.length) return;
+    RAW_BATCHES = [{
+      headers: CANONICAL_COL_ORDER, rows: data.rows,
+      importedAt: new Date().toISOString().slice(0,10),
+      sourceFile: 'Google Sheets (Cloud)'
+    }];
+    importRawGrosirRows(CANONICAL_COL_ORDER, data.rows);
+    finishImportRefresh();
+    if(typeof populateRawBatchFilter === 'function') populateRawBatchFilter();
+    if(document.getElementById('panelRawdata') && document.getElementById('panelRawdata').style.display !== 'none' && typeof renderRawData === 'function') renderRawData();
+    setSyncBadge('synced');
+  } catch(e){
+    console.error('loadRawDataFromCloud error', e);
+  }
+}
 const DATA = JSON.parse(document.getElementById('dashdata').textContent);
 const RAWDATA_INITIAL = JSON.parse(document.getElementById('rawdata').textContent);
 let RAW_BATCHES = [RAWDATA_INITIAL]; // array of {headers, rows, importedAt, sourceFile}
@@ -2190,7 +2257,8 @@ document.getElementById('importFile').addEventListener('change', (e)=>{
       msgEl.className = 'ok';
       msgEl.style.display = 'block';
       if(isRaw){
-        msgEl.textContent = `✓ Format DATA_GROSIR terdeteksi. Berhasil impor ${result.invoiceCount} invoice (${result.newCustCount} customer baru)${result.skippedNoCode?', '+result.skippedNoCode+' baris dilewati (tanpa Customer Code)':''}. Total sekarang: ${CUSTS.length} customer, ${result.monthsNow} bulan — Health Check, Tabel Bulanan, Margin & Profit, Rekomendasi Aksi, dan Analisis Produk semua sudah ter-update. Catatan: perubahan ini hanya berlaku di sesi browser ini — export data kalau mau disimpan.`;
+        msgEl.textContent = `✓ Format DATA_GROSIR terdeteksi. Berhasil impor ${result.invoiceCount} invoice (${result.newCustCount} customer baru)${result.skippedNoCode?', '+result.skippedNoCode+' baris dilewati (tanpa Customer Code)':''}. Total sekarang: ${CUSTS.length} customer, ${result.monthsNow} bulan — Health Check, Tabel Bulanan, Margin & Profit, Rekomendasi Aksi, dan Analisis Produk semua sudah ter-update. Data mentahnya juga sedang dikirim ke database cloud (lihat status di kanan atas).`;
+        pushRawRowsToCloud(headers, rows);
       } else {
         msgEl.textContent = `✓ Berhasil impor ${result.rowCount} baris (${result.newCustCount} customer baru). Total sekarang: ${CUSTS.length} customer, ${result.monthsNow} bulan. Catatan: perubahan ini hanya berlaku di sesi browser ini — export data kalau mau disimpan.`;
       }
@@ -4926,6 +4994,11 @@ document.querySelectorAll('#askExamples .chip').forEach(ch=>{
   ch.addEventListener('click', ()=> askQuestion(ch.dataset.q));
 });
 addAskMsg('bot', renderAskAnswer({text:'Halo! Tanya apa saja soal data customer — misalnya siapa yang paling tinggi omzetnya, siapa yang churned, atau ketik nama customer langsung. Klik salah satu contoh di atas untuk mulai.'}));
+
+// Muat data mentah dari Spreadsheet (kalau ada) begitu app dibuka,
+// supaya semua orang yang buka link lihat data yang sama.
+loadRawDataFromCloud();
+
 </script>
 </body>
 </html>
