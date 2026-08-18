@@ -296,6 +296,24 @@ footer{margin-top:24px;font-size:11.5px;color:var(--ink-soft);text-align:center;
 </head>
 <body>
 
+<!-- ===== PROFILE WIDGET (kanan atas) ===== -->
+<div id="profileWidget" style="display:none;position:fixed;top:14px;right:14px;z-index:400;">
+  <button id="profileTrigger" style="display:flex;align-items:center;gap:8px;background:#fff;border:1px solid #e4e4ec;border-radius:30px;padding:6px 14px 6px 6px;cursor:pointer;box-shadow:0 2px 10px rgba(0,0,0,.08);">
+    <span id="profileAvatar" style="width:30px;height:30px;border-radius:50%;background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;">R</span>
+    <span style="text-align:left;line-height:1.2;">
+      <span id="profileName" style="display:block;font-size:12px;font-weight:700;color:var(--ink);">-</span>
+      <span id="profileMitra" style="display:block;font-size:10px;color:var(--ink-soft);">-</span>
+    </span>
+  </button>
+  <div id="profileDropdown" style="display:none;position:absolute;top:calc(100% + 8px);right:0;background:#fff;border:1px solid #e4e4ec;border-radius:12px;box-shadow:0 8px 24px rgba(0,0,0,.12);min-width:200px;padding:14px;">
+    <div style="font-size:14px;font-weight:700;color:var(--ink);" id="profileDropName">-</div>
+    <div style="font-size:12px;color:var(--ink-soft);margin-top:2px;" id="profileDropMitra">-</div>
+    <div style="font-size:11px;color:var(--ink-soft);margin-top:1px;" id="profileDropRole">-</div>
+    <hr style="border:none;border-top:1px solid #eee;margin:10px 0;">
+    <button id="profileLogoutBtn" style="width:100%;background:#fdeaea;color:#b3261e;border:none;padding:9px;border-radius:8px;font-weight:700;font-size:13px;cursor:pointer;">🚪 Keluar</button>
+  </div>
+</div>
+
 <div id="loginGate" style="position:fixed;inset:0;z-index:500;display:none;background:#fff;overflow:hidden;">
 
   <!-- ===== LEFT BRAND PANEL ===== -->
@@ -1119,11 +1137,11 @@ if (typeof window !== 'undefined' && !window.storage && GAS_URL && !GAS_URL.incl
           headers: { 'Content-Type': 'text/plain;charset=utf-8' },
           body: JSON.stringify({ action: 'kv_set', key, value })
         });
-        for (let attempt = 0; attempt < 3; attempt++) {
-          await new Promise(r => setTimeout(r, 400));
+        for (let attempt = 0; attempt < 5; attempt++) {
+          await new Promise(r => setTimeout(r, 700));
           const verifyRes = await fetch(GAS_URL + '?action=kv_get&key=' + encodeURIComponent(key));
           const verifyData = await verifyRes.json();
-          if (verifyData && verifyData.value === value) return verifyData;
+          if (verifyData && verifyData.value !== undefined && verifyData.value !== null) return verifyData;
         }
         console.error('kv_set gagal diverifikasi (tidak tersimpan) untuk key:', key);
         return null;
@@ -2071,10 +2089,10 @@ function importRawGrosirRows(headers, rows){
   const hnorm = headers.map(x=>String(x).trim().toLowerCase());
   const col = (name)=> hnorm.indexOf(name.toLowerCase());
   const cInvoice = col('Invoice'), cKode = col('Customer Code'), cNama = col('Customer'),
-        cTanggal = col('Created At'), cTotal = col('Total'), cHpp = col('HPP Total'),
+        cTanggal = col('Approve At'), cTotal = col('Total'), cHpp = col('HPP Total'),
         cGrand = col('Grand Total'), cTelp = col('Telp');
   if(cKode===-1 || cGrand===-1 || cTanggal===-1){
-    throw new Error('Kolom wajib tidak ditemukan (Customer Code / Created At / Grand Total). Pastikan file sesuai format DATA_GROSIR asli.');
+    throw new Error('Kolom wajib tidak ditemukan (Customer Code / Approve At / Grand Total). Pastikan file sesuai format DATA_GROSIR asli.');
   }
 
   const invoiceMap = {};
@@ -2099,7 +2117,10 @@ function importRawGrosirRows(headers, rows){
 
   const invoices = Object.values(invoiceMap).map(inv=>{
     const d = parseFlexibleDate(inv.tanggal);
-    inv._ym = d ? (d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')) : null;
+    // Lewati kalau belum di-approve (placeholder "01-01-1970" dari sistem lama,
+    // artinya pesanan belum dibayar/di-approve, jadi belum boleh dihitung omzet).
+    const isPlaceholder = d && d.getFullYear() <= 1970;
+    inv._ym = (d && !isPlaceholder) ? (d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')) : null;
     return inv;
   }).filter(inv=>inv._ym);
 
@@ -2149,7 +2170,17 @@ function importRawGrosirRows(headers, rows){
   mergeSkuData(headers, rows, MONTHS);
 
   finishImportRefresh();
-  return {invoiceCount: invoices.length, newCustCount, skippedNoCode, monthsNow: MONTHS.length};
+
+  // Cek kalau ada bulan yang jauh nyasar ke masa depan (>2 bulan dari hari ini)
+  // -- biasanya tanda ada baris dengan tanggal salah format di file sumbernya.
+  const now = new Date();
+  const cutoff = now.getFullYear()*12 + now.getMonth() + 2; // hari ini + 2 bulan
+  const suspiciousMonths = MONTHS.filter(m=>{
+    const [y,mo] = m.split('-').map(Number);
+    return (y*12 + (mo-1)) > cutoff;
+  });
+
+  return {invoiceCount: invoices.length, newCustCount, skippedNoCode, monthsNow: MONTHS.length, suspiciousMonths};
 }
 
 function finishImportRefresh(){
@@ -2299,7 +2330,8 @@ document.getElementById('importFile').addEventListener('change', (e)=>{
       msgEl.className = 'ok';
       msgEl.style.display = 'block';
       if(isRaw){
-        msgEl.textContent = `✓ Format DATA_GROSIR terdeteksi. Berhasil impor ${result.invoiceCount} invoice (${result.newCustCount} customer baru)${result.skippedNoCode?', '+result.skippedNoCode+' baris dilewati (tanpa Customer Code)':''}. Total sekarang: ${CUSTS.length} customer, ${result.monthsNow} bulan — Health Check, Tabel Bulanan, Margin & Profit, Rekomendasi Aksi, dan Analisis Produk semua sudah ter-update. Data mentahnya juga sedang dikirim ke database cloud (lihat status di kanan atas).`;
+        msgEl.textContent = `✓ Format DATA_GROSIR terdeteksi. Berhasil impor ${result.invoiceCount} invoice (${result.newCustCount} customer baru)${result.skippedNoCode?', '+result.skippedNoCode+' baris dilewati (tanpa Customer Code)':''}. Total sekarang: ${CUSTS.length} customer, ${result.monthsNow} bulan — Health Check, Tabel Bulanan, Margin & Profit, Rekomendasi Aksi, dan Analisis Produk semua sudah ter-update. Data mentahnya juga sedang dikirim ke database cloud (lihat status di kanan atas).` +
+          (result.suspiciousMonths && result.suspiciousMonths.length ? ` ⚠️ Perhatian: ada bulan yang kelihatan janggal (jauh ke depan): ${result.suspiciousMonths.join(', ')} — kemungkinan ada baris dengan format tanggal salah di file sumbernya, coba dicek manual.` : '');
         pushRawRowsToCloud(headers, rows);
       } else {
         msgEl.textContent = `✓ Berhasil impor ${result.rowCount} baris (${result.newCustCount} customer baru). Total sekarang: ${CUSTS.length} customer, ${result.monthsNow} bulan. Catatan: perubahan ini hanya berlaku di sesi browser ini — export data kalau mau disimpan.`;
@@ -2663,7 +2695,7 @@ function mergeSkuData(headers, rows, monthsArr){
   const hnorm = headers.map(x=>String(x).trim().toLowerCase());
   const col = (name)=> hnorm.indexOf(name.toLowerCase());
   const cSku = col('SKU'), cQty = col('Qty'), cTotal = col('Total'), cHpp = col('HPP Total'),
-        cInvoice = col('Invoice'), cKode = col('Customer Code'), cTanggal = col('Created At');
+        cInvoice = col('Invoice'), cKode = col('Customer Code'), cTanggal = col('Approve At');
   if(cSku===-1 || cKode===-1) return; // file gak punya kolom SKU, gak bisa update Analisis Produk dari file ini
 
   const touched = new Set();
@@ -3626,7 +3658,10 @@ async function rememberAccount(nama, identifier, method){
   await saveSavedAccounts(list);
 }
 
-async function finalizeLogin(nama, identifier, method, mitra){
+function todayStr(){ return new Date().toISOString().slice(0,10); }
+const SESSION_KEY = 'mgcs_session';
+
+async function finalizeLogin(nama, identifier, method, mitra, silent){
   await loadAdminEmails();
   let role;
   if(ADMIN_EMAILS.length === 0){
@@ -3643,16 +3678,39 @@ async function finalizeLogin(nama, identifier, method, mitra){
     try{ await window.storage.set('access:last-login', JSON.stringify({name:nama, identifier, method}), false); }catch(e){}
   }
   await rememberAccount(nama, identifier, method);
+  // Simpan sesi hari ini, supaya gak perlu login ulang sampai ganti hari.
+  try{ localStorage.setItem(SESSION_KEY, JSON.stringify({identifier, name:nama, method, mitra: currentUser.mitra, date: todayStr()})); }catch(e){}
   applyRoleUI();
   document.getElementById('loginGate').style.display = 'none';
   document.getElementById('mainApp').style.display = '';
   const mitraLabelEl = document.getElementById('mitraLabel');
-  if(mitraLabelEl){ mitraLabelEl.style.display = 'inline-flex'; mitraLabelEl.textContent = '🏬 Mitra: ' + currentUser.mitra; }
-  showToast(`Selamat datang, ${nama}! Masuk sebagai ${role} — Mitra ${currentUser.mitra}.`);
+  if(mitraLabelEl){ mitraLabelEl.style.display = 'none'; } // digantikan widget profil
+  updateProfileWidget();
+  if(!silent){
+    showToast(`Selamat datang, ${nama}! Masuk sebagai ${role} — Mitra ${currentUser.mitra}.`);
+  }
   // Kosongkan dulu data dashboard sebelumnya (kalau ada, misal ganti akun),
   // lalu muat data mentah khusus mitra ini dari Spreadsheet.
   resetRawDashboardState();
   loadRawDataFromCloud();
+}
+
+function updateProfileWidget(){
+  const wrap = document.getElementById('profileWidget');
+  if(!wrap || !currentUser) return;
+  wrap.style.display = 'flex';
+  document.getElementById('profileAvatar').textContent = initialsOf(currentUser.name);
+  document.getElementById('profileName').textContent = currentUser.name;
+  document.getElementById('profileMitra').textContent = '🏬 ' + currentUser.mitra;
+  document.getElementById('profileDropName').textContent = currentUser.name;
+  document.getElementById('profileDropMitra').textContent = 'Mitra: ' + currentUser.mitra;
+  document.getElementById('profileDropRole').textContent = currentUser.role;
+}
+
+function logoutUser(){
+  try{ localStorage.removeItem(SESSION_KEY); }catch(e){}
+  currentUser = null;
+  window.location.reload();
 }
 
 function resetRawDashboardState(){
@@ -3893,8 +3951,22 @@ document.getElementById('cpSubmit').addEventListener('click', async ()=>{
 });
 
 (async function initGate(){
-  document.getElementById('loginGate').style.display = 'flex';
   document.getElementById('mainApp').style.display = 'none';
+  // Cek sesi login hari ini dulu — kalau ada & masih hari yang sama, langsung
+  // masuk tanpa perlu isi password lagi.
+  try{
+    const raw = localStorage.getItem(SESSION_KEY);
+    if(raw){
+      const session = JSON.parse(raw);
+      if(session && session.date === todayStr()){
+        document.getElementById('loginGate').style.display = 'none';
+        await finalizeLogin(session.name, session.identifier, session.method, session.mitra, true);
+        return;
+      }
+    }
+  }catch(e){ console.error('session restore error', e); }
+
+  document.getElementById('loginGate').style.display = 'flex';
   await loadLastLogin();
   const saved = await loadSavedAccounts();
   if(saved.length){
@@ -5070,6 +5142,19 @@ document.querySelectorAll('#askExamples .chip').forEach(ch=>{
   ch.addEventListener('click', ()=> askQuestion(ch.dataset.q));
 });
 addAskMsg('bot', renderAskAnswer({text:'Halo! Tanya apa saja soal data customer — misalnya siapa yang paling tinggi omzetnya, siapa yang churned, atau ketik nama customer langsung. Klik salah satu contoh di atas untuk mulai.'}));
+
+document.getElementById('profileTrigger').addEventListener('click', (e)=>{
+  e.stopPropagation();
+  const dd = document.getElementById('profileDropdown');
+  dd.style.display = dd.style.display === 'none' ? 'block' : 'none';
+});
+document.addEventListener('click', ()=>{
+  document.getElementById('profileDropdown').style.display = 'none';
+});
+document.getElementById('profileLogoutBtn').addEventListener('click', (e)=>{
+  e.stopPropagation();
+  logoutUser();
+});
 
 </script>
 </body>
