@@ -377,34 +377,27 @@ footer{margin-top:24px;font-size:11.5px;color:var(--ink-soft);text-align:center;
 
     <div id="fullGateForm">
 
-    <div style="display:flex;gap:5px;background:var(--bg);padding:4px;border-radius:10px;margin-bottom:22px;">
-      <button class="gate-method-btn active" data-method="wa" style="flex:1;">💬 WhatsApp</button>
-      <button class="gate-method-btn" data-method="email" style="flex:1;">✉️ Email</button>
-      <button class="gate-method-btn" data-method="apple" style="flex:1;"> Apple</button>
-    </div>
-    <!-- ===== LOGIN / REGISTER FORM (WA or Email) ===== -->
+    <!-- ===== LOGIN / REGISTER FORM (satu jalur: Nomor HP) ===== -->
     <div id="gateFormView">
-      <label class="gate-label">Nama</label>
+      <label class="gate-label">Username</label>
       <input type="text" id="gateNama" placeholder="Nama kamu" class="gate-input">
 
-      <label class="gate-label" id="gateIdLabel">Nomor WhatsApp</label>
+      <label class="gate-label" id="gateIdLabel">Nomor HP</label>
       <input type="text" id="gateIdentifier" placeholder="08xxxxxxxxxx" class="gate-input">
 
-      <label class="gate-label">Sandi</label>
+      <label class="gate-label">Password</label>
       <input type="password" id="gatePassword" placeholder="Minimal 6 karakter" class="gate-input">
 
       <div id="gateNewAccountFields" style="display:none;">
-        <label class="gate-label">Ulangi Sandi</label>
-        <input type="password" id="gateConfirmPassword" placeholder="Ulangi sandi" class="gate-input">
+        <label class="gate-label">Ulangi Password</label>
+        <input type="password" id="gateConfirmPassword" placeholder="Ulangi password" class="gate-input">
         <label class="gate-label">Mitra</label>
         <select id="gateMitra" class="gate-input">
           <option value="Mix-mix">Mix-mix</option>
           <option value="Thunder">Thunder</option>
         </select>
-        <label class="gate-label">Buat Pertanyaan Keamanan <span style="font-weight:400;color:var(--ink-soft);">(buat jaga-jaga kalau lupa sandi)</span></label>
-        <input type="text" id="gateSecQ" placeholder="mis. Nama hewan peliharaan pertama?" class="gate-input">
-        <label class="gate-label">Jawabannya</label>
-        <input type="text" id="gateSecA" placeholder="Jawaban kamu" class="gate-input">
+        <input type="hidden" id="gateSecQ" value="Mitra">
+        <input type="hidden" id="gateSecA" value="reset-oleh-admin">
       </div>
 
       <div id="gateMsg"></div>
@@ -1116,14 +1109,25 @@ if (typeof window !== 'undefined' && !window.storage && GAS_URL && !GAS_URL.incl
         return { key, value, shared: false };
       }
       try {
+        // POST ke Apps Script paling reliable pakai no-cors (GAS suka gagal
+        // kirim header CORS yang bisa dibaca browser buat POST biasa).
+        // Setelah kirim, kita VERIFIKASI beneran tersimpan lewat GET
+        // (GET terbukti reliable dibaca responsnya).
         await fetch(GAS_URL, {
           method: 'POST',
           mode: 'no-cors',
           headers: { 'Content-Type': 'text/plain;charset=utf-8' },
           body: JSON.stringify({ action: 'kv_set', key, value })
         });
-        return { key, value, shared: true };
-      } catch (e) { return null; }
+        for (let attempt = 0; attempt < 3; attempt++) {
+          await new Promise(r => setTimeout(r, 400));
+          const verifyRes = await fetch(GAS_URL + '?action=kv_get&key=' + encodeURIComponent(key));
+          const verifyData = await verifyRes.json();
+          if (verifyData && verifyData.value === value) return verifyData;
+        }
+        console.error('kv_set gagal diverifikasi (tidak tersimpan) untuk key:', key);
+        return null;
+      } catch (e) { console.error('kv_set error', e); return null; }
     },
     async delete(key, shared) {
       if (!shared) {
@@ -1137,8 +1141,15 @@ if (typeof window !== 'undefined' && !window.storage && GAS_URL && !GAS_URL.incl
           headers: { 'Content-Type': 'text/plain;charset=utf-8' },
           body: JSON.stringify({ action: 'kv_delete', key })
         });
-        return { key, deleted: true, shared: true };
-      } catch (e) { return null; }
+        for (let attempt = 0; attempt < 3; attempt++) {
+          await new Promise(r => setTimeout(r, 400));
+          const verifyRes = await fetch(GAS_URL + '?action=kv_get&key=' + encodeURIComponent(key));
+          const verifyData = await verifyRes.json();
+          if (!verifyData) return { key, deleted: true, shared: true };
+        }
+        console.error('kv_delete gagal diverifikasi untuk key:', key);
+        return null;
+      } catch (e) { console.error('kv_delete error', e); return null; }
     },
     async list(prefix, shared) {
       prefix = prefix || '';
@@ -1197,12 +1208,28 @@ async function pushRawRowsToCloud(headers, rows){
     const hnorm = headers.map(h=>String(h).trim().toLowerCase());
     const idx = CANONICAL_COL_ORDER.map(col => hnorm.indexOf(col.toLowerCase()));
     const orderedRows = rows.map(r => idx.map(i => i>=0 ? (r[i]!==undefined ? r[i] : '') : ''));
+    const sheetName = currentRawSheetName();
+
+    const beforeRes = await fetch(GAS_URL + '?action=get&sheet=' + encodeURIComponent(sheetName));
+    const beforeData = await beforeRes.json();
+    const beforeCount = (beforeData && beforeData.rows) ? beforeData.rows.length : 0;
+
     await fetch(GAS_URL, {
       method: 'POST',
       mode: 'no-cors',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify({ action: 'appendRows', sheet: currentRawSheetName(), rows: orderedRows })
+      body: JSON.stringify({ action: 'appendRows', sheet: sheetName, rows: orderedRows })
     });
+
+    let confirmed = false;
+    for(let attempt=0; attempt<4; attempt++){
+      await new Promise(r=> setTimeout(r, 600));
+      const afterRes = await fetch(GAS_URL + '?action=get&sheet=' + encodeURIComponent(sheetName));
+      const afterData = await afterRes.json();
+      const afterCount = (afterData && afterData.rows) ? afterData.rows.length : 0;
+      if(afterCount >= beforeCount + orderedRows.length){ confirmed = true; break; }
+    }
+    if(!confirmed) throw new Error('Data belum terverifikasi tersimpan di Spreadsheet setelah beberapa kali cek.');
     lastFailedPush = null;
     setSyncBadge('synced');
   } catch(e){
@@ -3502,10 +3529,14 @@ async function loadAccount(identifier){
 }
 async function saveAccount(identifier, data){
   if(hasStorage){
-    try{ await window.storage.set('account:'+identifier, JSON.stringify(data), true); }catch(e){}
+    try{
+      const res = await window.storage.set('account:'+identifier, JSON.stringify(data), true);
+      return !!res;
+    }catch(e){ return false; }
   } else {
     window._acctMemory = window._acctMemory || {};
     window._acctMemory[identifier] = data;
+    return true;
   }
 }
 
@@ -3517,7 +3548,6 @@ async function loadLastLogin(){
         const d = JSON.parse(res.value);
         document.getElementById('gateNama').value = d.name || '';
         document.getElementById('gateIdentifier').value = d.identifier || '';
-        if(d.method) setGateMethod(d.method);
       }
     }catch(e){ /* none saved yet */ }
   }
@@ -3730,33 +3760,38 @@ document.getElementById('gateSubmit').addEventListener('click', async ()=>{
   const msg = document.getElementById('gateMsg');
   msg.className = ''; msg.textContent = '';
 
-  if(!nama || !identifier){ msg.textContent = 'Isi nama dan '+(gateMethod==='wa'?'nomor WhatsApp':'email')+' dulu ya.'; return; }
-  if(gateMethod==='email' && !identifier.includes('@')){ msg.textContent = 'Format email belum valid.'; return; }
-  if(!password || password.length<6){ msg.textContent = 'Sandi minimal 6 karakter.'; return; }
+  if(!nama || !identifier){ msg.textContent = 'Isi username dan nomor HP dulu ya.'; return; }
+  if(!password || password.length<6){ msg.textContent = 'Password minimal 6 karakter.'; return; }
 
   const btn = document.getElementById('gateSubmit');
   btn.disabled = true;
+  btn.textContent = 'Memproses...';
   const acct = await loadAccount(identifier);
   let acctMitra;
 
   if(!acct){
     // register new account
     const confirmPass = document.getElementById('gateConfirmPassword').value;
-    const secQ = document.getElementById('gateSecQ').value.trim();
-    const secA = document.getElementById('gateSecA').value.trim();
+    const secQ = document.getElementById('gateSecQ').value.trim() || 'Mitra';
+    const secA = document.getElementById('gateSecA').value.trim() || 'reset-oleh-admin';
     const mitra = document.getElementById('gateMitra').value;
-    if(password !== confirmPass){ msg.textContent = 'Ulangi sandi tidak cocok.'; btn.disabled=false; return; }
-    if(!secQ || !secA){ msg.textContent = 'Isi pertanyaan & jawaban keamanan (buat jaga-jaga lupa sandi).'; btn.disabled=false; return; }
+    if(password !== confirmPass){ msg.textContent = 'Ulangi password tidak cocok.'; btn.disabled=false; btn.textContent='✨ Masuk'; return; }
     const passwordHash = await hashText(password);
     const secAHash = await hashText(secA.toLowerCase());
-    await saveAccount(identifier, {name:nama, method:gateMethod, passwordHash, secQ, secAHash, mitra, createdAt:new Date().toISOString().slice(0,10)});
+    const saved = await saveAccount(identifier, {name:nama, method:gateMethod, passwordHash, secQ, secAHash, mitra, createdAt:new Date().toISOString().slice(0,10)});
+    if(!saved){
+      msg.className = 'err';
+      msg.textContent = 'Gagal menyimpan akun ke database. Cek koneksi internet, lalu coba lagi.';
+      btn.disabled = false; btn.textContent = 'Daftar & Masuk';
+      return;
+    }
     acctMitra = mitra;
   } else {
     // login: verify password
     const passwordHash = await hashText(password);
     if(passwordHash !== acct.passwordHash){
-      msg.textContent = 'Sandi salah. Klik "Lupa sandi?" kalau perlu direset.';
-      btn.disabled = false;
+      msg.textContent = 'Password salah. Klik "Lupa sandi?" kalau perlu direset.';
+      btn.disabled = false; btn.textContent = 'Masuk';
       return;
     }
     acctMitra = acct.mitra || 'Mix-mix'; // akun lama sebelum fitur Mitra ada, default Mix-mix
@@ -3764,6 +3799,7 @@ document.getElementById('gateSubmit').addEventListener('click', async ()=>{
 
   await finalizeLogin(nama, identifier, gateMethod, acctMitra);
   btn.disabled = false;
+  btn.textContent = '✨ Masuk';
 });
 ['gateIdentifier','gateNama','gatePassword','gateConfirmPassword','gateSecA'].forEach(id=>{
   document.getElementById(id).addEventListener('keydown', e=>{ if(e.key==='Enter') document.getElementById('gateSubmit').click(); });
