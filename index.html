@@ -310,9 +310,22 @@ footer{margin-top:24px;font-size:11.5px;color:var(--ink-soft);text-align:center;
     <div style="font-size:12px;color:var(--ink-soft);margin-top:2px;" id="profileDropMitra">-</div>
     <div style="font-size:11px;color:var(--ink-soft);margin-top:1px;" id="profileDropRole">-</div>
     <hr style="border:none;border-top:1px solid #eee;margin:10px 0;">
+    <button id="profileSwitchBrandBtn" style="display:none;width:100%;background:#eef1ff;color:#3d3fa3;border:none;padding:9px;border-radius:8px;font-weight:700;font-size:13px;cursor:pointer;margin-bottom:8px;">🔀 Ganti Brand</button>
     <button id="profileLogoutBtn" style="width:100%;background:#fdeaea;color:#b3261e;border:none;padding:9px;border-radius:8px;font-weight:700;font-size:13px;cursor:pointer;">🚪 Keluar</button>
   </div>
 </div>
+
+<!-- ===== BRAND MENU (muncul kalau mitra punya lebih dari 1 brand) ===== -->
+<div id="brandMenu" style="display:none;position:fixed;inset:0;z-index:300;background:#f5f6fb;overflow-y:auto;">
+  <div style="max-width:720px;margin:0 auto;padding:60px 24px;">
+    <div style="text-align:center;margin-bottom:36px;">
+      <h1 style="font-family:Georgia,serif;font-size:26px;margin:0 0 6px;color:#1a1a2e;">Pilih Brand</h1>
+      <p style="color:#6b7280;font-size:14px;margin:0;" id="brandMenuSubtitle">Mitra: -</p>
+    </div>
+    <div id="brandMenuList" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:16px;"></div>
+  </div>
+</div>
+
 
 <div id="loginGate" style="position:fixed;inset:0;z-index:500;display:none;background:#fff;overflow:hidden;">
 
@@ -1213,10 +1226,26 @@ function setSyncBadge(state){
   }
 }
 
+// Daftar brand per mitra. Kalau satu mitra cuma punya 1 brand (atau tidak
+// terdaftar di sini), app langsung masuk dashboard tanpa nanya brand dulu.
+const MITRA_BRANDS = {
+  'Mix-mix': ['NVMEE', 'Reebit', 'Pandaoma'],
+};
+
+function brandsForMitra(mitra){
+  return MITRA_BRANDS[mitra] || [];
+}
+
+function brandSlug(mitra, brand){
+  const m = (mitra||'Default').replace(/[^a-zA-Z0-9]+/g,'') || 'Default';
+  const b = brand ? ('_' + brand.replace(/[^a-zA-Z0-9]+/g,'')) : '';
+  return m + b;
+}
+
 function currentRawSheetName(){
   const mitra = (currentUser && currentUser.mitra) ? currentUser.mitra : 'Mix-mix';
-  const slug = mitra.replace(/[^a-zA-Z0-9]+/g,'') || 'Default';
-  return 'RawData_' + slug;
+  const brand = (currentUser && currentUser.brand) ? currentUser.brand : null;
+  return 'RawData_' + brandSlug(mitra, brand);
 }
 
 async function pushRawRowsToCloud(headers, rows){
@@ -3661,7 +3690,7 @@ async function rememberAccount(nama, identifier, method){
 function todayStr(){ return new Date().toISOString().slice(0,10); }
 const SESSION_KEY = 'mgcs_session';
 
-async function finalizeLogin(nama, identifier, method, mitra, silent){
+async function finalizeLogin(nama, identifier, method, mitra, silent, brand){
   await loadAdminEmails();
   let role;
   if(ADMIN_EMAILS.length === 0){
@@ -3673,26 +3702,81 @@ async function finalizeLogin(nama, identifier, method, mitra, silent){
   } else {
     role = 'Leader';
   }
-  currentUser = {name: nama, email: identifier, role, mitra: mitra || 'Mix-mix'};
+  currentUser = {name: nama, email: identifier, role, mitra: mitra || 'Mix-mix', brand: brand || null};
   if(hasStorage){
     try{ await window.storage.set('access:last-login', JSON.stringify({name:nama, identifier, method}), false); }catch(e){}
   }
   await rememberAccount(nama, identifier, method);
-  // Simpan sesi hari ini, supaya gak perlu login ulang sampai ganti hari.
-  try{ localStorage.setItem(SESSION_KEY, JSON.stringify({identifier, name:nama, method, mitra: currentUser.mitra, date: todayStr()})); }catch(e){}
   applyRoleUI();
   document.getElementById('loginGate').style.display = 'none';
-  document.getElementById('mainApp').style.display = '';
   const mitraLabelEl = document.getElementById('mitraLabel');
   if(mitraLabelEl){ mitraLabelEl.style.display = 'none'; } // digantikan widget profil
   updateProfileWidget();
   if(!silent){
-    showToast(`Selamat datang, ${nama}! Masuk sebagai ${role} — Mitra ${currentUser.mitra}.`);
+    showToast(`Selamat datang, ${nama}! Masuk sebagai ${role}.`);
   }
-  // Kosongkan dulu data dashboard sebelumnya (kalau ada, misal ganti akun),
-  // lalu muat data mentah khusus mitra ini dari Spreadsheet.
+
+  const brands = brandsForMitra(currentUser.mitra);
+  if(brands.length > 1 && !currentUser.brand){
+    // Mitra ini punya lebih dari 1 brand & belum pilih -> tampilkan menu brand dulu.
+    document.getElementById('mainApp').style.display = 'none';
+    showBrandMenu();
+    saveSession();
+    return;
+  }
+  if(brands.length === 1 && !currentUser.brand) currentUser.brand = brands[0];
+
+  document.getElementById('brandMenu').style.display = 'none';
+  document.getElementById('mainApp').style.display = '';
+  updateProfileWidget();
+  saveSession();
+  // Kosongkan dulu data dashboard sebelumnya (kalau ada, misal ganti akun/brand),
+  // lalu muat data mentah khusus mitra+brand ini dari Spreadsheet.
   resetRawDashboardState();
   loadRawDataFromCloud();
+}
+
+function saveSession(){
+  if(!currentUser) return;
+  try{
+    localStorage.setItem(SESSION_KEY, JSON.stringify({
+      identifier: currentUser.email, name: currentUser.name, method: currentUser._method || 'wa',
+      mitra: currentUser.mitra, brand: currentUser.brand || null, date: todayStr()
+    }));
+  }catch(e){}
+}
+
+function showBrandMenu(){
+  const list = document.getElementById('brandMenuList');
+  const brands = brandsForMitra(currentUser.mitra);
+  document.getElementById('brandMenuSubtitle').textContent = 'Mitra: ' + currentUser.mitra;
+  list.innerHTML = brands.map(b => `
+    <button class="brand-card-btn" data-brand="${esc(b)}" style="background:#fff;border:1px solid #e4e4ec;border-radius:14px;padding:28px 16px;text-align:center;cursor:pointer;font-weight:700;font-size:16px;color:#1a1a2e;box-shadow:0 2px 8px rgba(0,0,0,.05);transition:.15s;">
+      <div style="width:48px;height:48px;border-radius:50%;background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:16px;margin:0 auto 12px;">${esc(b.slice(0,2).toUpperCase())}</div>
+      ${esc(b)}
+    </button>
+  `).join('');
+  document.getElementById('brandMenu').style.display = 'block';
+  list.querySelectorAll('.brand-card-btn').forEach(btn=>{
+    btn.addEventListener('click', ()=> selectBrand(btn.dataset.brand));
+  });
+}
+
+function selectBrand(brand){
+  currentUser.brand = brand;
+  document.getElementById('brandMenu').style.display = 'none';
+  document.getElementById('mainApp').style.display = '';
+  updateProfileWidget();
+  saveSession();
+  resetRawDashboardState();
+  loadRawDataFromCloud();
+}
+
+function switchBrand(){
+  currentUser.brand = null;
+  document.getElementById('mainApp').style.display = 'none';
+  showBrandMenu();
+  saveSession();
 }
 
 function updateProfileWidget(){
@@ -3701,10 +3785,12 @@ function updateProfileWidget(){
   wrap.style.display = 'flex';
   document.getElementById('profileAvatar').textContent = initialsOf(currentUser.name);
   document.getElementById('profileName').textContent = currentUser.name;
-  document.getElementById('profileMitra').textContent = '🏬 ' + currentUser.mitra;
+  document.getElementById('profileMitra').textContent = '🏬 ' + currentUser.mitra + (currentUser.brand ? ' · ' + currentUser.brand : '');
   document.getElementById('profileDropName').textContent = currentUser.name;
-  document.getElementById('profileDropMitra').textContent = 'Mitra: ' + currentUser.mitra;
+  document.getElementById('profileDropMitra').textContent = 'Mitra: ' + currentUser.mitra + (currentUser.brand ? ' — Brand: ' + currentUser.brand : '');
   document.getElementById('profileDropRole').textContent = currentUser.role;
+  const switchBtn = document.getElementById('profileSwitchBrandBtn');
+  if(switchBtn) switchBtn.style.display = brandsForMitra(currentUser.mitra).length > 1 ? 'block' : 'none';
 }
 
 function logoutUser(){
@@ -3960,7 +4046,7 @@ document.getElementById('cpSubmit').addEventListener('click', async ()=>{
       const session = JSON.parse(raw);
       if(session && session.date === todayStr()){
         document.getElementById('loginGate').style.display = 'none';
-        await finalizeLogin(session.name, session.identifier, session.method, session.mitra, true);
+        await finalizeLogin(session.name, session.identifier, session.method, session.mitra, true, session.brand);
         return;
       }
     }
@@ -5154,6 +5240,11 @@ document.addEventListener('click', ()=>{
 document.getElementById('profileLogoutBtn').addEventListener('click', (e)=>{
   e.stopPropagation();
   logoutUser();
+});
+document.getElementById('profileSwitchBrandBtn').addEventListener('click', (e)=>{
+  e.stopPropagation();
+  document.getElementById('profileDropdown').style.display = 'none';
+  switchBrand();
 });
 
 </script>
