@@ -1150,8 +1150,8 @@ if (typeof window !== 'undefined' && !window.storage && GAS_URL && !GAS_URL.incl
           headers: { 'Content-Type': 'text/plain;charset=utf-8' },
           body: JSON.stringify({ action: 'kv_set', key, value })
         });
-        for (let attempt = 0; attempt < 5; attempt++) {
-          await new Promise(r => setTimeout(r, 700));
+        for (let attempt = 0; attempt < 8; attempt++) {
+          await new Promise(r => setTimeout(r, 900));
           const verifyRes = await fetch(GAS_URL + '?action=kv_get&key=' + encodeURIComponent(key));
           const verifyData = await verifyRes.json();
           if (verifyData && verifyData.value !== undefined && verifyData.value !== null) return verifyData;
