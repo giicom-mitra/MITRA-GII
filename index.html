@@ -3772,14 +3772,72 @@ const IDX_GRAND_TOTAL = CANONICAL_COL_ORDER.indexOf('Grand Total');
 const BRAND_COLORS = { NVMEE: '#7c3aed', Pandaoma: '#2563eb', Reebit: '#db2777' };
 const BRAND_COLOR_FALLBACKS = ['#7c3aed','#2563eb','#db2777','#059669','#d97706'];
 
-async function fetchBrandRawRows(mitra, brand){
+function dashCacheKey(mitra, brand){ return 'dashcache:' + brandSlug(mitra, brand); }
+
+function loadDashCache(mitra, brand){
+  try{
+    const raw = localStorage.getItem(dashCacheKey(mitra, brand));
+    return raw ? JSON.parse(raw) : { rowCount: 0, monthlyTotals: {} };
+  }catch(e){ return { rowCount: 0, monthlyTotals: {} }; }
+}
+function saveDashCache(mitra, brand, cache){
+  try{ localStorage.setItem(dashCacheKey(mitra, brand), JSON.stringify(cache)); }catch(e){}
+}
+
+async function getBrandCount(mitra, brand){
+  if(typeof GAS_URL === 'undefined' || !GAS_URL) return 0;
+  try{
+    const sheetName = 'RawData_' + brandSlug(mitra, brand);
+    const res = await fetchWithTimeout(GAS_URL + '?action=count&sheet=' + encodeURIComponent(sheetName), {}, 8000);
+    const data = await res.json();
+    return (data && typeof data.count === 'number') ? data.count : 0;
+  }catch(e){ return -1; } // -1 = gagal cek, biar caller tau bedanya dari "0 baris"
+}
+
+async function fetchBrandRawRowsFrom(mitra, brand, fromIndex){
   if(typeof GAS_URL === 'undefined' || !GAS_URL) return [];
   try{
     const sheetName = 'RawData_' + brandSlug(mitra, brand);
-    const res = await fetchWithTimeout(GAS_URL + '?action=get&sheet=' + encodeURIComponent(sheetName), {}, 10000);
+    const res = await fetchWithTimeout(GAS_URL + '?action=get&sheet=' + encodeURIComponent(sheetName) + '&from=' + fromIndex, {}, 25000);
     const data = await res.json();
     return (data && data.rows) ? data.rows : [];
-  }catch(e){ console.error('fetchBrandRawRows timeout/error for', brand, e); return []; }
+  }catch(e){ console.error('fetchBrandRawRowsFrom timeout/error for', brand, e); return null; } // null = gagal (beda dari [] yang berarti "memang kosong")
+}
+
+/**
+ * Ambil total omzet per bulan untuk 1 brand, pakai cache lokal browser.
+ * Kalau jumlah baris di Spreadsheet SAMA dengan cache, langsung pakai cache
+ * (gak perlu baca ulang semua data — jauh lebih cepat). Kalau ada baris baru,
+ * cuma baris barunya aja yang dibaca lalu ditambahkan ke cache.
+ */
+async function getBrandMonthlyTotalsCached(mitra, brand){
+  const cache = loadDashCache(mitra, brand);
+  const serverCount = await getBrandCount(mitra, brand);
+
+  if(serverCount === -1){
+    // Gagal cek jumlah baris (koneksi bermasalah) -> pakai cache lama kalau ada,
+    // daripada nampilin kosong sama sekali.
+    return cache.monthlyTotals;
+  }
+  if(serverCount === cache.rowCount){
+    return cache.monthlyTotals; // gak ada perubahan, langsung pakai cache
+  }
+
+  const startFrom = (serverCount > cache.rowCount) ? cache.rowCount : 0; // kalau data direset/berkurang, baca ulang dari awal
+  const baseTotals = (startFrom === 0) ? {} : cache.monthlyTotals;
+  const newRows = await fetchBrandRawRowsFrom(mitra, brand, startFrom);
+
+  if(newRows === null){
+    // Gagal ambil baris baru -> tetap pakai cache lama supaya gak nol/hilang
+    return cache.monthlyTotals;
+  }
+
+  const delta = monthlyTotalsFromRows(newRows);
+  const merged = Object.assign({}, baseTotals);
+  Object.keys(delta).forEach(ym=> merged[ym] = (merged[ym]||0) + delta[ym]);
+
+  saveDashCache(mitra, brand, { rowCount: serverCount, monthlyTotals: merged });
+  return merged;
 }
 
 function monthlyTotalsFromRows(rows){
@@ -3870,8 +3928,7 @@ async function renderDashboardUtama(){
     const perBrandYearTotal = {};
     const perBrandMonthTotal = {};
     for(const b of brands){
-      const rows = await fetchBrandRawRows(mitra, b);
-      const monthly = monthlyTotalsFromRows(rows);
+      const monthly = await getBrandMonthlyTotalsCached(mitra, b);
       perBrandMonthly[b] = monthly;
       let yearTotal = 0, monthTotal = 0;
       Object.keys(monthly).forEach(ym=>{
