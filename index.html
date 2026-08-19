@@ -292,9 +292,17 @@ footer{margin-top:24px;font-size:11.5px;color:var(--ink-soft);text-align:center;
 .toast{background:var(--ink);color:#fff;padding:10px 16px;border-radius:8px;font-size:12.5px;box-shadow:0 6px 20px rgba(0,0,0,.2);animation:toastIn .2s ease;max-width:280px;}
 .toast.toast-error{background:var(--rust);}
 @keyframes toastIn{from{opacity:0;transform:translateY(8px);}to{opacity:1;transform:translateY(0);}}
+.mini-spinner{display:inline-block;width:14px;height:14px;border:2px solid rgba(0,0,0,.12);border-top-color:#5a5ad6;border-radius:50%;animation:spin .7s linear infinite;vertical-align:middle;margin-right:6px;}
+@keyframes spin{to{transform:rotate(360deg);}}
 </style>
 </head>
 <body>
+
+<!-- ===== INITIAL LOADING OVERLAY (biar gak keliatan blank pas cek sesi login) ===== -->
+<div id="initialLoader" style="position:fixed;inset:0;z-index:999;background:#f5f6fb;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;">
+  <div style="width:36px;height:36px;border:3px solid #e4e4ec;border-top-color:#5a5ad6;border-radius:50%;animation:spin .7s linear infinite;"></div>
+  <div style="color:#9ca3af;font-size:13px;">Memuat sistem...</div>
+</div>
 
 <!-- ===== PROFILE WIDGET (kanan atas) ===== -->
 <div id="profileWidget" style="display:none;position:fixed;top:14px;right:14px;z-index:400;">
@@ -1223,7 +1231,7 @@ function setSyncBadge(state){
   el.onclick = null;
   if(state === 'syncing'){
     el.style.background = '#fff8e1'; el.style.color = '#8a6d00'; el.style.border = '1px solid #f0d778';
-    el.textContent = '☁ Menyimpan ke cloud...';
+    el.innerHTML = '<span class="mini-spinner" style="border-top-color:#8a6d00;"></span>Menyimpan ke cloud...';
   } else if(state === 'synced'){
     el.style.background = '#e6f7ee'; el.style.color = '#0a7a3d'; el.style.border = '1px solid #a6e6c4';
     el.textContent = '✓ Tersimpan ke Cloud';
@@ -3768,10 +3776,10 @@ async function fetchBrandRawRows(mitra, brand){
   if(typeof GAS_URL === 'undefined' || !GAS_URL) return [];
   try{
     const sheetName = 'RawData_' + brandSlug(mitra, brand);
-    const res = await fetch(GAS_URL + '?action=get&sheet=' + encodeURIComponent(sheetName));
+    const res = await fetchWithTimeout(GAS_URL + '?action=get&sheet=' + encodeURIComponent(sheetName), {}, 10000);
     const data = await res.json();
     return (data && data.rows) ? data.rows : [];
-  }catch(e){ return []; }
+  }catch(e){ console.error('fetchBrandRawRows timeout/error for', brand, e); return []; }
 }
 
 function monthlyTotalsFromRows(rows){
@@ -3823,95 +3831,7 @@ async function renderDashboardUtama(){
 
   document.getElementById('dashChartYear').textContent = year;
 
-  // Ambil & hitung data tiap brand
-  const perBrandMonthly = {}; // {brand: {yyyymm: total}}
-  const perBrandYearTotal = {};
-  const perBrandMonthTotal = {};
-  for(const b of brands){
-    const rows = await fetchBrandRawRows(mitra, b);
-    const monthly = monthlyTotalsFromRows(rows);
-    perBrandMonthly[b] = monthly;
-    let yearTotal = 0, monthTotal = 0;
-    Object.keys(monthly).forEach(ym=>{
-      if(ym.startsWith(year+'-')) yearTotal += monthly[ym];
-      if(ym === thisYm) monthTotal += monthly[ym];
-    });
-    perBrandYearTotal[b] = yearTotal;
-    perBrandMonthTotal[b] = monthTotal;
-  }
-  const grandYearTotal = brands.reduce((s,b)=> s + (perBrandYearTotal[b]||0), 0);
-  const grandMonthTotal = brands.reduce((s,b)=> s + (perBrandMonthTotal[b]||0), 0);
-
-  // ---- Kartu ringkasan ----
-  const summaryEl = document.getElementById('dashSummaryCards');
-  const breakdownHtml = (obj)=> brands.map(b=>`<span style="display:inline-block;margin-right:10px;">${esc(b)}: <b>${formatRpShort(obj[b]||0)}</b></span>`).join('');
-  summaryEl.innerHTML = `
-    <div style="background:#fff;border-radius:14px;padding:18px 20px;box-shadow:0 2px 8px rgba(0,0,0,.04);">
-      <div style="font-size:12px;color:#6b7280;font-weight:700;letter-spacing:.03em;">💰 OMZET TAHUN INI (SEMUA BRAND)</div>
-      <div style="font-size:26px;font-weight:800;color:#1a1a2e;margin:6px 0 8px;">${formatRp(grandYearTotal)}</div>
-      <div style="font-size:12px;color:#6b7280;">${breakdownHtml(perBrandYearTotal)}</div>
-    </div>
-    <div style="background:#fff;border-radius:14px;padding:18px 20px;box-shadow:0 2px 8px rgba(0,0,0,.04);">
-      <div style="font-size:12px;color:#6b7280;font-weight:700;letter-spacing:.03em;">📅 OMZET BULAN INI (SEMUA BRAND)</div>
-      <div style="font-size:26px;font-weight:800;color:#1a1a2e;margin:6px 0 8px;">${formatRp(grandMonthTotal)}</div>
-      <div style="font-size:12px;color:#6b7280;">${breakdownHtml(perBrandMonthTotal)}</div>
-    </div>
-  `;
-
-  // ---- Kartu target (editable) ----
-  const monthlyTarget = await getTarget(mitra, 'monthly', thisYm);
-  const yearlyTarget = await getTarget(mitra, 'yearly', String(year));
-  const pct = (val, target)=> target>0 ? Math.min(100, Math.round((val/target)*100)) : 0;
-  const targetEl = document.getElementById('dashTargetCards');
-  targetEl.innerHTML = `
-    <div style="background:#fff;border-radius:14px;padding:18px 20px;box-shadow:0 2px 8px rgba(0,0,0,.04);">
-      <div style="display:flex;justify-content:space-between;align-items:center;">
-        <div style="font-size:12px;color:#6b7280;font-weight:700;">🎯 TARGET BULANAN (BULAN INI)</div>
-        <button id="editMonthlyTargetBtn" style="background:none;border:none;color:#5a5ad6;font-size:12px;cursor:pointer;font-weight:700;">✏️ Edit</button>
-      </div>
-      <div style="font-size:22px;font-weight:800;color:#1a1a2e;margin:6px 0 8px;">${formatRp(grandMonthTotal)}</div>
-      <div style="background:#f3e8ff;border-radius:8px;height:8px;overflow:hidden;"><div style="background:#7c3aed;height:100%;width:${pct(grandMonthTotal,monthlyTarget)}%;"></div></div>
-      <div style="display:flex;justify-content:space-between;font-size:11px;color:#6b7280;margin-top:4px;">
-        <span>Tercapai: ${pct(grandMonthTotal,monthlyTarget)}%</span><span>Target: ${monthlyTarget>0?formatRp(monthlyTarget):'belum diisi'}</span>
-      </div>
-    </div>
-    <div style="background:#fff;border-radius:14px;padding:18px 20px;box-shadow:0 2px 8px rgba(0,0,0,.04);">
-      <div style="display:flex;justify-content:space-between;align-items:center;">
-        <div style="font-size:12px;color:#6b7280;font-weight:700;">🏆 TARGET TAHUNAN (TAHUN INI)</div>
-        <button id="editYearlyTargetBtn" style="background:none;border:none;color:#5a5ad6;font-size:12px;cursor:pointer;font-weight:700;">✏️ Edit</button>
-      </div>
-      <div style="font-size:22px;font-weight:800;color:#1a1a2e;margin:6px 0 8px;">${formatRp(grandYearTotal)}</div>
-      <div style="background:#e0e7ff;border-radius:8px;height:8px;overflow:hidden;"><div style="background:#2563eb;height:100%;width:${pct(grandYearTotal,yearlyTarget)}%;"></div></div>
-      <div style="display:flex;justify-content:space-between;font-size:11px;color:#6b7280;margin-top:4px;">
-        <span>Tercapai: ${pct(grandYearTotal,yearlyTarget)}%</span><span>Target: ${yearlyTarget>0?formatRp(yearlyTarget):'belum diisi'}</span>
-      </div>
-    </div>
-  `;
-  document.getElementById('editMonthlyTargetBtn').addEventListener('click', async ()=>{
-    const v = prompt('Target omzet bulan ini (angka saja, contoh 700000000):', monthlyTarget||'');
-    if(v===null) return;
-    const num = parseNumber(v);
-    if(num>0){ await setTarget(mitra,'monthly',thisYm,num); renderDashboardUtama(); }
-  });
-  document.getElementById('editYearlyTargetBtn').addEventListener('click', async ()=>{
-    const v = prompt('Target omzet tahun ini (angka saja, contoh 10000000000):', yearlyTarget||'');
-    if(v===null) return;
-    const num = parseNumber(v);
-    if(num>0){ await setTarget(mitra,'yearly',String(year),num); renderDashboardUtama(); }
-  });
-
-  // ---- Grafik garis per brand ----
-  const monthLabels = ['Jan','Feb','Mar','Apr','Mei','Jun','Jul','Agu','Sep','Okt','Nov','Des'];
-  const seriesByBrand = {};
-  brands.forEach(b=>{
-    seriesByBrand[b] = monthLabels.map((_,i)=> perBrandMonthly[b][year+'-'+String(i+1).padStart(2,'0')] || 0);
-  });
-  document.getElementById('dashChartLegend').innerHTML = brands.map(b=>
-    `<span style="display:inline-flex;align-items:center;gap:5px;margin-right:14px;"><span style="width:10px;height:10px;border-radius:50%;background:${esc(BRAND_COLORS[b]||'#999')};display:inline-block;"></span>${esc(b)}</span>`
-  ).join('');
-  document.getElementById('dashChartWrap').innerHTML = renderBrandLineChartSvg(seriesByBrand, monthLabels, brands);
-
-  // ---- Kartu pilih brand (dengan logo kalau ada) ----
+  // ---- 1) Kartu pilih brand DULUAN — biar langsung bisa diklik, gak nunggu data ringkasan ----
   const list = document.getElementById('brandMenuList');
   list.innerHTML = brands.map(b => `
     <button class="brand-card-btn" data-brand="${esc(b)}" style="background:#fff;border:1px solid #e4e4ec;border-radius:14px;padding:22px 16px;text-align:center;cursor:pointer;font-weight:700;font-size:15px;color:#1a1a2e;box-shadow:0 2px 8px rgba(0,0,0,.05);">
@@ -3938,14 +3858,123 @@ async function renderDashboardUtama(){
       else alert('Gagal menyimpan logo, coba lagi.');
     });
   });
-  // Tempel logo yang sudah tersimpan (kalau ada)
-  for(const b of brands){
-    const url = await getBrandLogo(mitra, b);
-    if(url){
-      const slot = list.querySelector(`.brand-logo-slot[data-brand="${CSS.escape(b)}"]`);
-      if(slot) slot.innerHTML = `<img src="${esc(url)}" style="width:100%;height:100%;object-fit:cover;" onerror="this.style.display='none'">`;
+
+  // Tampilan sementara buat area ringkasan/target/grafik selagi loading
+  document.getElementById('dashSummaryCards').innerHTML = `<div style="grid-column:1/-1;text-align:center;color:#9ca3af;font-size:13px;padding:20px;"><span class="mini-spinner"></span>Memuat & sinkronisasi data omzet...</div>`;
+  document.getElementById('dashTargetCards').innerHTML = '';
+  document.getElementById('dashChartWrap').innerHTML = `<div style="color:#9ca3af;font-size:13px;padding:20px;text-align:center;"><span class="mini-spinner"></span>Memuat grafik...</div>`;
+
+  // ---- 2) Ambil & hitung data ringkasan lintas brand (async, ada batas waktu biar gak nyangkut) ----
+  try{
+    const perBrandMonthly = {};
+    const perBrandYearTotal = {};
+    const perBrandMonthTotal = {};
+    for(const b of brands){
+      const rows = await fetchBrandRawRows(mitra, b);
+      const monthly = monthlyTotalsFromRows(rows);
+      perBrandMonthly[b] = monthly;
+      let yearTotal = 0, monthTotal = 0;
+      Object.keys(monthly).forEach(ym=>{
+        if(ym.startsWith(year+'-')) yearTotal += monthly[ym];
+        if(ym === thisYm) monthTotal += monthly[ym];
+      });
+      perBrandYearTotal[b] = yearTotal;
+      perBrandMonthTotal[b] = monthTotal;
     }
+    const grandYearTotal = brands.reduce((s,b)=> s + (perBrandYearTotal[b]||0), 0);
+    const grandMonthTotal = brands.reduce((s,b)=> s + (perBrandMonthTotal[b]||0), 0);
+
+    // ---- Kartu ringkasan ----
+    const summaryEl = document.getElementById('dashSummaryCards');
+    const breakdownHtml = (obj)=> brands.map(b=>`<span style="display:inline-block;margin-right:10px;">${esc(b)}: <b>${formatRpShort(obj[b]||0)}</b></span>`).join('');
+    summaryEl.innerHTML = `
+      <div style="background:#fff;border-radius:14px;padding:18px 20px;box-shadow:0 2px 8px rgba(0,0,0,.04);">
+        <div style="font-size:12px;color:#6b7280;font-weight:700;letter-spacing:.03em;">💰 OMZET TAHUN INI (SEMUA BRAND)</div>
+        <div style="font-size:26px;font-weight:800;color:#1a1a2e;margin:6px 0 8px;">${formatRp(grandYearTotal)}</div>
+        <div style="font-size:12px;color:#6b7280;">${breakdownHtml(perBrandYearTotal)}</div>
+      </div>
+      <div style="background:#fff;border-radius:14px;padding:18px 20px;box-shadow:0 2px 8px rgba(0,0,0,.04);">
+        <div style="font-size:12px;color:#6b7280;font-weight:700;letter-spacing:.03em;">📅 OMZET BULAN INI (SEMUA BRAND)</div>
+        <div style="font-size:26px;font-weight:800;color:#1a1a2e;margin:6px 0 8px;">${formatRp(grandMonthTotal)}</div>
+        <div style="font-size:12px;color:#6b7280;">${breakdownHtml(perBrandMonthTotal)}</div>
+      </div>
+    `;
+
+    // ---- Kartu target (editable) ----
+    const monthlyTarget = await getTarget(mitra, 'monthly', thisYm);
+    const yearlyTarget = await getTarget(mitra, 'yearly', String(year));
+    const pct = (val, target)=> target>0 ? Math.min(100, Math.round((val/target)*100)) : 0;
+    const targetEl = document.getElementById('dashTargetCards');
+    targetEl.innerHTML = `
+      <div style="background:#fff;border-radius:14px;padding:18px 20px;box-shadow:0 2px 8px rgba(0,0,0,.04);">
+        <div style="display:flex;justify-content:space-between;align-items:center;">
+          <div style="font-size:12px;color:#6b7280;font-weight:700;">🎯 TARGET BULANAN (BULAN INI)</div>
+          <button id="editMonthlyTargetBtn" style="background:none;border:none;color:#5a5ad6;font-size:12px;cursor:pointer;font-weight:700;">✏️ Edit</button>
+        </div>
+        <div style="font-size:22px;font-weight:800;color:#1a1a2e;margin:6px 0 8px;">${formatRp(grandMonthTotal)}</div>
+        <div style="background:#f3e8ff;border-radius:8px;height:8px;overflow:hidden;"><div style="background:#7c3aed;height:100%;width:${pct(grandMonthTotal,monthlyTarget)}%;"></div></div>
+        <div style="display:flex;justify-content:space-between;font-size:11px;color:#6b7280;margin-top:4px;">
+          <span>Tercapai: ${pct(grandMonthTotal,monthlyTarget)}%</span><span>Target: ${monthlyTarget>0?formatRp(monthlyTarget):'belum diisi'}</span>
+        </div>
+      </div>
+      <div style="background:#fff;border-radius:14px;padding:18px 20px;box-shadow:0 2px 8px rgba(0,0,0,.04);">
+        <div style="display:flex;justify-content:space-between;align-items:center;">
+          <div style="font-size:12px;color:#6b7280;font-weight:700;">🏆 TARGET TAHUNAN (TAHUN INI)</div>
+          <button id="editYearlyTargetBtn" style="background:none;border:none;color:#5a5ad6;font-size:12px;cursor:pointer;font-weight:700;">✏️ Edit</button>
+        </div>
+        <div style="font-size:22px;font-weight:800;color:#1a1a2e;margin:6px 0 8px;">${formatRp(grandYearTotal)}</div>
+        <div style="background:#e0e7ff;border-radius:8px;height:8px;overflow:hidden;"><div style="background:#2563eb;height:100%;width:${pct(grandYearTotal,yearlyTarget)}%;"></div></div>
+        <div style="display:flex;justify-content:space-between;font-size:11px;color:#6b7280;margin-top:4px;">
+          <span>Tercapai: ${pct(grandYearTotal,yearlyTarget)}%</span><span>Target: ${yearlyTarget>0?formatRp(yearlyTarget):'belum diisi'}</span>
+        </div>
+      </div>
+    `;
+    document.getElementById('editMonthlyTargetBtn').addEventListener('click', async ()=>{
+      const v = prompt('Target omzet bulan ini (angka saja, contoh 700000000):', monthlyTarget||'');
+      if(v===null) return;
+      const num = parseNumber(v);
+      if(num>0){ await setTarget(mitra,'monthly',thisYm,num); renderDashboardUtama(); }
+    });
+    document.getElementById('editYearlyTargetBtn').addEventListener('click', async ()=>{
+      const v = prompt('Target omzet tahun ini (angka saja, contoh 10000000000):', yearlyTarget||'');
+      if(v===null) return;
+      const num = parseNumber(v);
+      if(num>0){ await setTarget(mitra,'yearly',String(year),num); renderDashboardUtama(); }
+    });
+
+    // ---- Grafik garis per brand ----
+    const monthLabels = ['Jan','Feb','Mar','Apr','Mei','Jun','Jul','Agu','Sep','Okt','Nov','Des'];
+    const seriesByBrand = {};
+    brands.forEach(b=>{
+      seriesByBrand[b] = monthLabels.map((_,i)=> (perBrandMonthly[b]||{})[year+'-'+String(i+1).padStart(2,'0')] || 0);
+    });
+    document.getElementById('dashChartLegend').innerHTML = brands.map(b=>
+      `<span style="display:inline-flex;align-items:center;gap:5px;margin-right:14px;"><span style="width:10px;height:10px;border-radius:50%;background:${esc(BRAND_COLORS[b]||'#999')};display:inline-block;"></span>${esc(b)}</span>`
+    ).join('');
+    document.getElementById('dashChartWrap').innerHTML = renderBrandLineChartSvg(seriesByBrand, monthLabels, brands);
+  }catch(err){
+    console.error('renderDashboardUtama error', err);
+    document.getElementById('dashSummaryCards').innerHTML = `<div style="grid-column:1/-1;text-align:center;color:#b3261e;font-size:13px;padding:20px;">Gagal memuat ringkasan omzet. Data brand di bawah tetap bisa dibuka.</div>`;
+    document.getElementById('dashChartWrap').innerHTML = '';
   }
+
+  // ---- Tempel logo yang sudah tersimpan (kalau ada) — jalan belakangan, gak blocking ----
+  for(const b of brands){
+    try{
+      const url = await getBrandLogo(mitra, b);
+      if(url){
+        const slot = list.querySelector(`.brand-logo-slot[data-brand="${CSS.escape(b)}"]`);
+        if(slot) slot.innerHTML = `<img src="${esc(url)}" style="width:100%;height:100%;object-fit:cover;" onerror="this.style.display='none'">`;
+      }
+    }catch(e){}
+  }
+}
+
+function fetchWithTimeout(url, options, ms){
+  return Promise.race([
+    fetch(url, options),
+    new Promise((_, reject) => setTimeout(()=> reject(new Error('timeout')), ms))
+  ]);
 }
 
 function renderBrandLineChartSvg(seriesByBrand, monthLabels, brands){
@@ -4260,6 +4289,7 @@ document.getElementById('cpSubmit').addEventListener('click', async ()=>{
 });
 
 (async function initGate(){
+ try{
   document.getElementById('mainApp').style.display = 'none';
   // Cek sesi login hari ini dulu — kalau ada & masih hari yang sama, langsung
   // masuk tanpa perlu isi password lagi.
@@ -4284,6 +4314,10 @@ document.getElementById('cpSubmit').addEventListener('click', async ()=>{
   } else {
     showFullForm();
   }
+ } finally {
+  const loader = document.getElementById('initialLoader');
+  if(loader) loader.style.display = 'none';
+ }
 })();
 
 document.getElementById('btnAboutSystem').addEventListener('click', ()=>{
