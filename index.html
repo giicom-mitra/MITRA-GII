@@ -3814,21 +3814,24 @@ async function getBrandMonthlyTotalsCached(mitra, brand){
   const cache = loadDashCache(mitra, brand);
   const serverCount = await getBrandCount(mitra, brand);
 
-  if(serverCount === -1){
-    // Gagal cek jumlah baris (koneksi bermasalah) -> pakai cache lama kalau ada,
-    // daripada nampilin kosong sama sekali.
+  // Kalau jumlah baris SAMA persis dengan cache (dan cache bukan kosong-belum-pernah-baca),
+  // langsung pakai cache — gak perlu baca ulang data.
+  if(serverCount !== -1 && serverCount === cache.rowCount && cache.rowCount > 0){
     return cache.monthlyTotals;
   }
-  if(serverCount === cache.rowCount){
-    return cache.monthlyTotals; // gak ada perubahan, langsung pakai cache
-  }
 
-  const startFrom = (serverCount > cache.rowCount) ? cache.rowCount : 0; // kalau data direset/berkurang, baca ulang dari awal
-  const baseTotals = (startFrom === 0) ? {} : cache.monthlyTotals;
+  // Kalau ada data baru (server > cache), cukup baca baris barunya aja.
+  // Kalau cek jumlah baris gagal (-1), atau ini baca pertama kali, atau data
+  // berkurang/direset -> baca ULANG dari awal (lebih aman daripada nol/salah).
+  const isIncremental = (serverCount !== -1) && (cache.rowCount > 0) && (serverCount > cache.rowCount);
+  const startFrom = isIncremental ? cache.rowCount : 0;
+  const baseTotals = isIncremental ? cache.monthlyTotals : {};
+
   const newRows = await fetchBrandRawRowsFrom(mitra, brand, startFrom);
 
   if(newRows === null){
-    // Gagal ambil baris baru -> tetap pakai cache lama supaya gak nol/hilang
+    // Beneran gagal ambil data (bukan cuma cek jumlah baris) -> baru deh pakai cache lama.
+    console.error('Gagal ambil data untuk brand', brand, '- pakai cache lama sebagai fallback.');
     return cache.monthlyTotals;
   }
 
@@ -3836,7 +3839,8 @@ async function getBrandMonthlyTotalsCached(mitra, brand){
   const merged = Object.assign({}, baseTotals);
   Object.keys(delta).forEach(ym=> merged[ym] = (merged[ym]||0) + delta[ym]);
 
-  saveDashCache(mitra, brand, { rowCount: serverCount, monthlyTotals: merged });
+  const finalCount = (serverCount !== -1) ? serverCount : (startFrom + newRows.length);
+  saveDashCache(mitra, brand, { rowCount: finalCount, monthlyTotals: merged });
   return merged;
 }
 
