@@ -315,13 +315,24 @@ footer{margin-top:24px;font-size:11.5px;color:var(--ink-soft);text-align:center;
   </div>
 </div>
 
-<!-- ===== BRAND MENU (muncul kalau mitra punya lebih dari 1 brand) ===== -->
+<!-- ===== DASHBOARD UTAMA (muncul kalau mitra punya lebih dari 1 brand) ===== -->
 <div id="brandMenu" style="display:none;position:fixed;inset:0;z-index:300;background:#f5f6fb;overflow-y:auto;">
-  <div style="max-width:720px;margin:0 auto;padding:60px 24px;">
-    <div style="text-align:center;margin-bottom:36px;">
-      <h1 style="font-family:Georgia,serif;font-size:26px;margin:0 0 6px;color:#1a1a2e;">Pilih Brand</h1>
-      <p style="color:#6b7280;font-size:14px;margin:0;" id="brandMenuSubtitle">Mitra: -</p>
+  <div style="max-width:960px;margin:0 auto;padding:40px 24px 60px;">
+    <div style="margin-bottom:24px;">
+      <h1 style="font-family:Georgia,serif;font-size:26px;margin:0 0 4px;color:#1a1a2e;">Dashboard Mitra</h1>
+      <p style="color:#6b7280;font-size:13px;margin:0;" id="brandMenuSubtitle">Ringkasan performa sistem (Termasuk Semua Brand Jika Ada)</p>
     </div>
+
+    <div id="dashSummaryCards" style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px;"></div>
+    <div id="dashTargetCards" style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px;"></div>
+
+    <div style="background:#fff;border-radius:14px;padding:20px;margin-bottom:28px;box-shadow:0 2px 8px rgba(0,0,0,.04);">
+      <div style="font-weight:700;color:#1a1a2e;margin-bottom:4px;">📈 Tren Omzet <span id="dashChartYear"></span> per Brand</div>
+      <div id="dashChartLegend" style="font-size:12px;color:#6b7280;margin-bottom:10px;"></div>
+      <div id="dashChartWrap" style="overflow-x:auto;"></div>
+    </div>
+
+    <div style="text-align:center;margin-bottom:16px;font-weight:700;color:#1a1a2e;">Pilih Brand untuk Lihat Detail</div>
     <div id="brandMenuList" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:16px;"></div>
   </div>
 </div>
@@ -3746,20 +3757,232 @@ function saveSession(){
   }catch(e){}
 }
 
-function showBrandMenu(){
+// ---------- Dashboard Utama (lintas brand) ----------
+
+const IDX_APPROVE_AT = CANONICAL_COL_ORDER.indexOf('Approve At');
+const IDX_GRAND_TOTAL = CANONICAL_COL_ORDER.indexOf('Grand Total');
+const BRAND_COLORS = { NVMEE: '#7c3aed', Pandaoma: '#2563eb', Reebit: '#db2777' };
+const BRAND_COLOR_FALLBACKS = ['#7c3aed','#2563eb','#db2777','#059669','#d97706'];
+
+async function fetchBrandRawRows(mitra, brand){
+  if(typeof GAS_URL === 'undefined' || !GAS_URL) return [];
+  try{
+    const sheetName = 'RawData_' + brandSlug(mitra, brand);
+    const res = await fetch(GAS_URL + '?action=get&sheet=' + encodeURIComponent(sheetName));
+    const data = await res.json();
+    return (data && data.rows) ? data.rows : [];
+  }catch(e){ return []; }
+}
+
+function monthlyTotalsFromRows(rows){
+  const map = {};
+  rows.forEach(r=>{
+    const d = parseFlexibleDate(r[IDX_APPROVE_AT]);
+    if(!d || d.getFullYear() <= 1970) return;
+    const ym = d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0');
+    map[ym] = (map[ym]||0) + parseNumber(r[IDX_GRAND_TOTAL]);
+  });
+  return map;
+}
+
+function targetKeyFor(mitra, kind, period){ return 'target_' + kind + ':' + brandSlug(mitra) + ':' + period; }
+async function getTarget(mitra, kind, period){
+  if(!hasStorage) return 0;
+  try{ const res = await window.storage.get(targetKeyFor(mitra,kind,period), true); return res && res.value ? Number(res.value)||0 : 0; }
+  catch(e){ return 0; }
+}
+async function setTarget(mitra, kind, period, value){
+  if(!hasStorage) return false;
+  try{ const res = await window.storage.set(targetKeyFor(mitra,kind,period), String(value), true); return !!res; }
+  catch(e){ return false; }
+}
+
+function brandLogoKeyFor(mitra, brand){ return 'brand_logo:' + brandSlug(mitra, brand); }
+async function getBrandLogo(mitra, brand){
+  if(!hasStorage) return null;
+  try{ const res = await window.storage.get(brandLogoKeyFor(mitra,brand), true); return res ? res.value : null; }
+  catch(e){ return null; }
+}
+async function setBrandLogo(mitra, brand, url){
+  if(!hasStorage) return false;
+  try{ const res = await window.storage.set(brandLogoKeyFor(mitra,brand), url, true); return !!res; }
+  catch(e){ return false; }
+}
+
+function formatRpShort(v){
+  if(v>=1e9) return 'Rp ' + (v/1e9).toFixed(2).replace(/\.00$/,'') + 'M';
+  if(v>=1e6) return 'Rp ' + (v/1e6).toFixed(1).replace(/\.0$/,'') + 'jt';
+  return formatRp(v);
+}
+
+async function renderDashboardUtama(){
+  const mitra = currentUser.mitra;
+  const brands = brandsForMitra(mitra);
+  const year = new Date().getFullYear();
+  const thisYm = new Date().getFullYear()+'-'+String(new Date().getMonth()+1).padStart(2,'0');
+
+  document.getElementById('dashChartYear').textContent = year;
+
+  // Ambil & hitung data tiap brand
+  const perBrandMonthly = {}; // {brand: {yyyymm: total}}
+  const perBrandYearTotal = {};
+  const perBrandMonthTotal = {};
+  for(const b of brands){
+    const rows = await fetchBrandRawRows(mitra, b);
+    const monthly = monthlyTotalsFromRows(rows);
+    perBrandMonthly[b] = monthly;
+    let yearTotal = 0, monthTotal = 0;
+    Object.keys(monthly).forEach(ym=>{
+      if(ym.startsWith(year+'-')) yearTotal += monthly[ym];
+      if(ym === thisYm) monthTotal += monthly[ym];
+    });
+    perBrandYearTotal[b] = yearTotal;
+    perBrandMonthTotal[b] = monthTotal;
+  }
+  const grandYearTotal = brands.reduce((s,b)=> s + (perBrandYearTotal[b]||0), 0);
+  const grandMonthTotal = brands.reduce((s,b)=> s + (perBrandMonthTotal[b]||0), 0);
+
+  // ---- Kartu ringkasan ----
+  const summaryEl = document.getElementById('dashSummaryCards');
+  const breakdownHtml = (obj)=> brands.map(b=>`<span style="display:inline-block;margin-right:10px;">${esc(b)}: <b>${formatRpShort(obj[b]||0)}</b></span>`).join('');
+  summaryEl.innerHTML = `
+    <div style="background:#fff;border-radius:14px;padding:18px 20px;box-shadow:0 2px 8px rgba(0,0,0,.04);">
+      <div style="font-size:12px;color:#6b7280;font-weight:700;letter-spacing:.03em;">💰 OMZET TAHUN INI (SEMUA BRAND)</div>
+      <div style="font-size:26px;font-weight:800;color:#1a1a2e;margin:6px 0 8px;">${formatRp(grandYearTotal)}</div>
+      <div style="font-size:12px;color:#6b7280;">${breakdownHtml(perBrandYearTotal)}</div>
+    </div>
+    <div style="background:#fff;border-radius:14px;padding:18px 20px;box-shadow:0 2px 8px rgba(0,0,0,.04);">
+      <div style="font-size:12px;color:#6b7280;font-weight:700;letter-spacing:.03em;">📅 OMZET BULAN INI (SEMUA BRAND)</div>
+      <div style="font-size:26px;font-weight:800;color:#1a1a2e;margin:6px 0 8px;">${formatRp(grandMonthTotal)}</div>
+      <div style="font-size:12px;color:#6b7280;">${breakdownHtml(perBrandMonthTotal)}</div>
+    </div>
+  `;
+
+  // ---- Kartu target (editable) ----
+  const monthlyTarget = await getTarget(mitra, 'monthly', thisYm);
+  const yearlyTarget = await getTarget(mitra, 'yearly', String(year));
+  const pct = (val, target)=> target>0 ? Math.min(100, Math.round((val/target)*100)) : 0;
+  const targetEl = document.getElementById('dashTargetCards');
+  targetEl.innerHTML = `
+    <div style="background:#fff;border-radius:14px;padding:18px 20px;box-shadow:0 2px 8px rgba(0,0,0,.04);">
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <div style="font-size:12px;color:#6b7280;font-weight:700;">🎯 TARGET BULANAN (BULAN INI)</div>
+        <button id="editMonthlyTargetBtn" style="background:none;border:none;color:#5a5ad6;font-size:12px;cursor:pointer;font-weight:700;">✏️ Edit</button>
+      </div>
+      <div style="font-size:22px;font-weight:800;color:#1a1a2e;margin:6px 0 8px;">${formatRp(grandMonthTotal)}</div>
+      <div style="background:#f3e8ff;border-radius:8px;height:8px;overflow:hidden;"><div style="background:#7c3aed;height:100%;width:${pct(grandMonthTotal,monthlyTarget)}%;"></div></div>
+      <div style="display:flex;justify-content:space-between;font-size:11px;color:#6b7280;margin-top:4px;">
+        <span>Tercapai: ${pct(grandMonthTotal,monthlyTarget)}%</span><span>Target: ${monthlyTarget>0?formatRp(monthlyTarget):'belum diisi'}</span>
+      </div>
+    </div>
+    <div style="background:#fff;border-radius:14px;padding:18px 20px;box-shadow:0 2px 8px rgba(0,0,0,.04);">
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <div style="font-size:12px;color:#6b7280;font-weight:700;">🏆 TARGET TAHUNAN (TAHUN INI)</div>
+        <button id="editYearlyTargetBtn" style="background:none;border:none;color:#5a5ad6;font-size:12px;cursor:pointer;font-weight:700;">✏️ Edit</button>
+      </div>
+      <div style="font-size:22px;font-weight:800;color:#1a1a2e;margin:6px 0 8px;">${formatRp(grandYearTotal)}</div>
+      <div style="background:#e0e7ff;border-radius:8px;height:8px;overflow:hidden;"><div style="background:#2563eb;height:100%;width:${pct(grandYearTotal,yearlyTarget)}%;"></div></div>
+      <div style="display:flex;justify-content:space-between;font-size:11px;color:#6b7280;margin-top:4px;">
+        <span>Tercapai: ${pct(grandYearTotal,yearlyTarget)}%</span><span>Target: ${yearlyTarget>0?formatRp(yearlyTarget):'belum diisi'}</span>
+      </div>
+    </div>
+  `;
+  document.getElementById('editMonthlyTargetBtn').addEventListener('click', async ()=>{
+    const v = prompt('Target omzet bulan ini (angka saja, contoh 700000000):', monthlyTarget||'');
+    if(v===null) return;
+    const num = parseNumber(v);
+    if(num>0){ await setTarget(mitra,'monthly',thisYm,num); renderDashboardUtama(); }
+  });
+  document.getElementById('editYearlyTargetBtn').addEventListener('click', async ()=>{
+    const v = prompt('Target omzet tahun ini (angka saja, contoh 10000000000):', yearlyTarget||'');
+    if(v===null) return;
+    const num = parseNumber(v);
+    if(num>0){ await setTarget(mitra,'yearly',String(year),num); renderDashboardUtama(); }
+  });
+
+  // ---- Grafik garis per brand ----
+  const monthLabels = ['Jan','Feb','Mar','Apr','Mei','Jun','Jul','Agu','Sep','Okt','Nov','Des'];
+  const seriesByBrand = {};
+  brands.forEach(b=>{
+    seriesByBrand[b] = monthLabels.map((_,i)=> perBrandMonthly[b][year+'-'+String(i+1).padStart(2,'0')] || 0);
+  });
+  document.getElementById('dashChartLegend').innerHTML = brands.map(b=>
+    `<span style="display:inline-flex;align-items:center;gap:5px;margin-right:14px;"><span style="width:10px;height:10px;border-radius:50%;background:${esc(BRAND_COLORS[b]||'#999')};display:inline-block;"></span>${esc(b)}</span>`
+  ).join('');
+  document.getElementById('dashChartWrap').innerHTML = renderBrandLineChartSvg(seriesByBrand, monthLabels, brands);
+
+  // ---- Kartu pilih brand (dengan logo kalau ada) ----
   const list = document.getElementById('brandMenuList');
-  const brands = brandsForMitra(currentUser.mitra);
-  document.getElementById('brandMenuSubtitle').textContent = 'Mitra: ' + currentUser.mitra;
   list.innerHTML = brands.map(b => `
-    <button class="brand-card-btn" data-brand="${esc(b)}" style="background:#fff;border:1px solid #e4e4ec;border-radius:14px;padding:28px 16px;text-align:center;cursor:pointer;font-weight:700;font-size:16px;color:#1a1a2e;box-shadow:0 2px 8px rgba(0,0,0,.05);transition:.15s;">
-      <div style="width:48px;height:48px;border-radius:50%;background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:16px;margin:0 auto 12px;">${esc(b.slice(0,2).toUpperCase())}</div>
+    <button class="brand-card-btn" data-brand="${esc(b)}" style="background:#fff;border:1px solid #e4e4ec;border-radius:14px;padding:22px 16px;text-align:center;cursor:pointer;font-weight:700;font-size:15px;color:#1a1a2e;box-shadow:0 2px 8px rgba(0,0,0,.05);">
+      <div class="brand-logo-slot" data-brand="${esc(b)}" style="width:48px;height:48px;border-radius:50%;background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:16px;margin:0 auto 10px;overflow:hidden;">${esc(b.slice(0,2).toUpperCase())}</div>
       ${esc(b)}
+      <div style="margin-top:6px;"><span class="brand-logo-edit-link" data-brand="${esc(b)}" style="font-size:11px;font-weight:400;color:#9ca3af;">Ganti Logo</span></div>
     </button>
   `).join('');
   document.getElementById('brandMenu').style.display = 'block';
   list.querySelectorAll('.brand-card-btn').forEach(btn=>{
-    btn.addEventListener('click', ()=> selectBrand(btn.dataset.brand));
+    btn.addEventListener('click', (e)=>{
+      if(e.target.classList.contains('brand-logo-edit-link')) return;
+      selectBrand(btn.dataset.brand);
+    });
   });
+  list.querySelectorAll('.brand-logo-edit-link').forEach(link=>{
+    link.addEventListener('click', async (e)=>{
+      e.stopPropagation();
+      const b = link.dataset.brand;
+      const url = prompt('Masukkan URL gambar logo untuk ' + b + ' (link gambar publik, misal dari Google Drive/Imgur):', '');
+      if(url===null || !url.trim()) return;
+      const ok = await setBrandLogo(mitra, b, url.trim());
+      if(ok) renderDashboardUtama();
+      else alert('Gagal menyimpan logo, coba lagi.');
+    });
+  });
+  // Tempel logo yang sudah tersimpan (kalau ada)
+  for(const b of brands){
+    const url = await getBrandLogo(mitra, b);
+    if(url){
+      const slot = list.querySelector(`.brand-logo-slot[data-brand="${CSS.escape(b)}"]`);
+      if(slot) slot.innerHTML = `<img src="${esc(url)}" style="width:100%;height:100%;object-fit:cover;" onerror="this.style.display='none'">`;
+    }
+  }
+}
+
+function renderBrandLineChartSvg(seriesByBrand, monthLabels, brands){
+  const W = 900, H = 260, padL = 60, padR = 20, padT = 16, padB = 30;
+  const chartW = W - padL - padR, chartH = H - padT - padB;
+  let maxVal = 1;
+  brands.forEach(b => (seriesByBrand[b]||[]).forEach(v => { if(v > maxVal) maxVal = v; }));
+  maxVal = Math.ceil(maxVal / 1e6) * 1e6 || 1e6;
+  const stepX = chartW / (monthLabels.length - 1);
+  const yFor = v => padT + chartH - (v / maxVal) * chartH;
+  const xFor = i => padL + i * stepX;
+
+  let gridLines = '', yLabels = '';
+  for(let g=0; g<=4; g++){
+    const val = maxVal * g / 4;
+    const y = yFor(val);
+    gridLines += `<line x1="${padL}" y1="${y}" x2="${W-padR}" y2="${y}" stroke="#eee" stroke-width="1"/>`;
+    yLabels += `<text x="${padL-8}" y="${y+4}" font-size="10" fill="#9ca3af" text-anchor="end">${formatRpShort(val)}</text>`;
+  }
+  let xLabels = monthLabels.map((m,i)=> `<text x="${xFor(i)}" y="${H-8}" font-size="10" fill="#9ca3af" text-anchor="middle">${m}</text>`).join('');
+
+  let lines = '';
+  brands.forEach(b=>{
+    const series = seriesByBrand[b] || [];
+    const color = BRAND_COLORS[b] || '#999';
+    const points = series.map((v,i)=> `${xFor(i)},${yFor(v)}`).join(' ');
+    const dots = series.map((v,i)=> `<circle cx="${xFor(i)}" cy="${yFor(v)}" r="2.5" fill="${color}"/>`).join('');
+    lines += `<polyline points="${points}" fill="none" stroke="${color}" stroke-width="2.5"/>${dots}`;
+  });
+
+  return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;min-width:640px;">${gridLines}${yLabels}${xLabels}${lines}</svg>`;
+}
+
+function showBrandMenu(){
+  document.getElementById('brandMenuSubtitle').textContent = 'Ringkasan performa sistem (Termasuk Semua Brand Jika Ada) — Mitra: ' + currentUser.mitra;
+  document.getElementById('brandMenu').style.display = 'block';
+  renderDashboardUtama();
 }
 
 function selectBrand(brand){
