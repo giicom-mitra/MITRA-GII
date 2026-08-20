@@ -3774,10 +3774,11 @@ function saveSession(){
 
 const IDX_APPROVE_AT = CANONICAL_COL_ORDER.indexOf('Approve At');
 const IDX_GRAND_TOTAL = CANONICAL_COL_ORDER.indexOf('Grand Total');
+const IDX_INVOICE = CANONICAL_COL_ORDER.indexOf('Invoice');
 const BRAND_COLORS = { NVMEE: '#7c3aed', Pandaoma: '#2563eb', Reebit: '#db2777' };
 const BRAND_COLOR_FALLBACKS = ['#7c3aed','#2563eb','#db2777','#059669','#d97706'];
 
-function dashCacheKey(mitra, brand){ return 'dashcache_v2:' + brandSlug(mitra, brand); }
+function dashCacheKey(mitra, brand){ return 'dashcache_v3:' + brandSlug(mitra, brand); }
 
 function loadDashCache(mitra, brand){
   try{
@@ -3851,7 +3852,15 @@ async function getBrandMonthlyTotalsCached(mitra, brand){
 
 function monthlyTotalsFromRows(rows){
   const map = {};
+  const seenInvoices = {};
   rows.forEach(r=>{
+    // Grand Total itu nilai per-INVOICE, diulang di tiap baris SKU pada invoice
+    // yang sama -> hitung cuma sekali per invoice, jangan dijumlah per baris.
+    const invNo = IDX_INVOICE>=0 ? r[IDX_INVOICE] : null;
+    if(invNo){
+      if(seenInvoices[invNo]) return;
+      seenInvoices[invNo] = true;
+    }
     const d = parseFlexibleDate(r[IDX_APPROVE_AT]);
     if(!d || d.getFullYear() <= 1970) return;
     const ym = d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0');
