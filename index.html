@@ -1276,26 +1276,31 @@ async function pushRawRowsToCloud(headers, rows){
     const orderedRows = rows.map(r => idx.map(i => i>=0 ? (r[i]!==undefined ? r[i] : '') : ''));
     const sheetName = currentRawSheetName();
 
-    const beforeRes = await fetch(GAS_URL + '?action=get&sheet=' + encodeURIComponent(sheetName));
-    const beforeData = await beforeRes.json();
-    const beforeCount = (beforeData && beforeData.rows) ? beforeData.rows.length : 0;
-
+    // PENTING: pakai replaceAll (bukan appendRows) — setiap Import Data dianggap
+    // sebagai data TERBARU & LENGKAP untuk brand ini, jadi menggantikan seluruh
+    // isi sheet-nya, bukan menambah baris baru (biar gak numpuk duplikat kalau
+    // Robert import ulang file yang sama/serupa berkali-kali).
     await fetch(GAS_URL, {
       method: 'POST',
       mode: 'no-cors',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify({ action: 'appendRows', sheet: sheetName, rows: orderedRows })
+      body: JSON.stringify({ action: 'replaceAll', sheet: sheetName, rows: orderedRows })
     });
 
     let confirmed = false;
-    for(let attempt=0; attempt<4; attempt++){
-      await new Promise(r=> setTimeout(r, 600));
-      const afterRes = await fetch(GAS_URL + '?action=get&sheet=' + encodeURIComponent(sheetName));
-      const afterData = await afterRes.json();
-      const afterCount = (afterData && afterData.rows) ? afterData.rows.length : 0;
-      if(afterCount >= beforeCount + orderedRows.length){ confirmed = true; break; }
+    for(let attempt=0; attempt<5; attempt++){
+      await new Promise(r=> setTimeout(r, 700));
+      try{
+        const afterRes = await fetch(GAS_URL + '?action=count&sheet=' + encodeURIComponent(sheetName));
+        const afterData = await afterRes.json();
+        if(typeof afterData.count === 'number' && afterData.count === orderedRows.length){ confirmed = true; break; }
+      }catch(e){}
     }
     if(!confirmed) throw new Error('Data belum terverifikasi tersimpan di Spreadsheet setelah beberapa kali cek.');
+
+    // Reset cache dashboard lokal untuk brand ini, biar Dashboard Utama baca ulang dari nol.
+    try{ localStorage.removeItem(dashCacheKey(currentUser.mitra, currentUser.brand)); }catch(e){}
+
     lastFailedPush = null;
     setSyncBadge('synced');
   } catch(e){
@@ -3772,7 +3777,7 @@ const IDX_GRAND_TOTAL = CANONICAL_COL_ORDER.indexOf('Grand Total');
 const BRAND_COLORS = { NVMEE: '#7c3aed', Pandaoma: '#2563eb', Reebit: '#db2777' };
 const BRAND_COLOR_FALLBACKS = ['#7c3aed','#2563eb','#db2777','#059669','#d97706'];
 
-function dashCacheKey(mitra, brand){ return 'dashcache:' + brandSlug(mitra, brand); }
+function dashCacheKey(mitra, brand){ return 'dashcache_v2:' + brandSlug(mitra, brand); }
 
 function loadDashCache(mitra, brand){
   try{
